@@ -27,6 +27,8 @@ import androidx.compose.ui.window.Dialog
 import net.ip.rerouter.ui.theme.AccentSignal
 import net.ip.rerouter.ui.theme.AppType
 import net.ip.rerouter.ui.theme.BgSurfaceRaised
+import net.ip.rerouter.ui.theme.TextPrimary
+import net.ip.rerouter.ui.theme.TextSecondary
 
 @Composable
 fun CreateInterfaceDialog(
@@ -35,6 +37,7 @@ fun CreateInterfaceDialog(
 ) {
     var name by remember { mutableStateOf("") }
     var isDummy by remember { mutableStateOf(false) }
+
     val nameValid = name.matches(Regex("^[a-zA-Z][a-zA-Z0-9]{0,14}$"))
 
     Dialog(onDismissRequest = onDismiss) {
@@ -45,22 +48,45 @@ fun CreateInterfaceDialog(
         ) {
             Text("New interface", style = AppType.displayTitle)
             Spacer(Modifier.height(4.dp))
-            Text("Creates a virtual interface you fully control.", style = AppType.bodySecondary)
+            Text(
+                "Creates a virtual interface owned by this app.",
+                style = AppType.bodySecondary
+            )
+
             Spacer(Modifier.height(16.dp))
 
             OutlinedTextField(
                 value = name,
-                onValueChange = { name = it.filter { c -> c.isLetterOrDigit() } },
-                label = { Text("Name") },
-                placeholder = { Text(if (isDummy) "dummy0" else "tun1") },
+                onValueChange = { value ->
+                    name = value.filter { it.isLetterOrDigit() }
+                },
+                label = { Text("Name", color = TextSecondary) },
+                placeholder = {
+                    Text(
+                        if (isDummy) "dummy0" else "tun1",
+                        color = TextSecondary
+                    )
+                },
                 isError = name.isNotEmpty() && !nameValid,
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
-                colors = TextFieldDefaults.colors(focusedIndicatorColor = AccentSignal)
+                colors = TextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedContainerColor = BgSurfaceRaised,
+                    unfocusedContainerColor = BgSurfaceRaised,
+                    focusedIndicatorColor = AccentSignal,
+                    unfocusedIndicatorColor = TextSecondary,
+                    cursorColor = AccentSignal,
+                    focusedLabelColor = AccentSignal,
+                    unfocusedLabelColor = TextSecondary
+                )
             )
+
             if (name.isNotEmpty() && !nameValid) {
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    "Letters and numbers only, starting with a letter, up to 15 chars",
+                    "Letters and numbers only; start with a letter; max 15 characters.",
                     style = AppType.dataSecondary
                 )
             }
@@ -68,6 +94,7 @@ fun CreateInterfaceDialog(
             Spacer(Modifier.height(14.dp))
             Text("Type", style = AppType.sectionLabel)
             Spacer(Modifier.height(8.dp))
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = !isDummy,
@@ -80,20 +107,36 @@ fun CreateInterfaceDialog(
                     label = { Text("dummy") }
                 )
             }
+
+            Spacer(Modifier.height(6.dp))
+
             Text(
-                if (isDummy) "A link-layer stub — useful as a routing endpoint or sink."
-                else "A point-to-point virtual interface for tunneled traffic.",
-                style = AppType.dataSecondary
+                if (isDummy) {
+                    "A link-layer stub — useful as a routing endpoint or sink."
+                } else {
+                    "A point-to-point virtual interface for tunneled traffic."
+                },
+                style = AppType.bodySecondary
             )
 
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+
+            Row(
+                horizontalArrangement = Arrangement.End,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+
                 Spacer(Modifier.width(8.dp))
+
                 OutlinedButton(
                     enabled = nameValid,
                     onClick = { onConfirm(name, isDummy) }
-                ) { Text("Create") }
+                ) {
+                    Text("Create")
+                }
             }
         }
     }

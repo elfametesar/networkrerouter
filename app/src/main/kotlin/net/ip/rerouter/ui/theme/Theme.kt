@@ -9,53 +9,92 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// --- Palette -----------------------------------------------------------
-// A systems-utility dark surface, not a consumer-app one. One accent only.
-val BgBase = Color(0xFF0B0F14)        // near-black slate, cooler than pure black
-val BgSurface = Color(0xFF12181F)     // cards / rows
-val BgSurfaceRaised = Color(0xFF1A222B)
-val HairlineColor = Color(0xFF232C36)
-val TextPrimary = Color(0xFFE6EDF3)
-val TextSecondary = Color(0xFF8A97A6)
-val TextTertiary = Color(0xFF5B6672)
-val AccentSignal = Color(0xFF3DDC84)  // routed/active state
-val AccentWarn = Color(0xFFE3A008)
-val AccentDanger = Color(0xFFE5484D)
-val InterfaceWifi = Color(0xFF5AB0FF)
-val InterfaceCellular = Color(0xFFB98CFF)
-val InterfaceTun = Color(0xFF3DDC84)
-val InterfaceOther = Color(0xFF8A97A6)
+val BgBase = Color(0xFF0B0F14)
+val BgSurface = Color(0xFF141B23)
+val BgSurfaceRaised = Color(0xFF1D2732)
+val HairlineColor = Color(0xFF34404D)
 
-// --- Type ----------------------------------------------------------------
-// Interface names, IPs, MACs are data — monospace. Everything else is UI chrome.
+val TextPrimary = Color(0xFFF2F6FA)
+val TextSecondary = Color(0xFFB7C2CE)
+val TextTertiary = Color(0xFF8793A0)
+
+val AccentSignal = Color(0xFF45E58A)
+val AccentWarn = Color(0xFFFFC247)
+val AccentDanger = Color(0xFFFF6B70)
+
+val InterfaceWifi = Color(0xFF70BCFF)
+val InterfaceCellular = Color(0xFFC6A2FF)
+val InterfaceTun = Color(0xFF45E58A)
+val InterfaceOther = Color(0xFFB7C2CE)
+
 val MonoFamily = FontFamily.Monospace
 val SansFamily = FontFamily.SansSerif
 
 object AppType {
     val displayTitle = TextStyle(
-        fontFamily = SansFamily, fontWeight = FontWeight.SemiBold, fontSize = 22.sp
+        fontFamily = SansFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 22.sp,
+        color = TextPrimary
     )
+
     val sectionLabel = TextStyle(
-        fontFamily = SansFamily, fontWeight = FontWeight.Medium, fontSize = 12.sp,
-        letterSpacing = 1.2.sp
+        fontFamily = SansFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 12.sp,
+        letterSpacing = 1.2.sp,
+        color = TextSecondary
     )
-    val body = TextStyle(fontFamily = SansFamily, fontSize = 14.sp)
-    val bodySecondary = TextStyle(fontFamily = SansFamily, fontSize = 13.sp, color = TextSecondary)
-    val dataPrimary = TextStyle(fontFamily = MonoFamily, fontWeight = FontWeight.Medium, fontSize = 15.sp)
-    val dataSecondary = TextStyle(fontFamily = MonoFamily, fontSize = 12.sp, color = TextSecondary)
+
+    val body = TextStyle(
+        fontFamily = SansFamily,
+        fontSize = 14.sp,
+        color = TextPrimary
+    )
+
+    val bodySecondary = TextStyle(
+        fontFamily = SansFamily,
+        fontSize = 13.sp,
+        color = TextSecondary
+    )
+
+    val dataPrimary = TextStyle(
+        fontFamily = MonoFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        color = TextPrimary
+    )
+
+    val dataSecondary = TextStyle(
+        fontFamily = MonoFamily,
+        fontSize = 12.sp,
+        color = TextSecondary
+    )
 }
 
 private val DarkScheme = darkColorScheme(
-    background = BgBase,
-    surface = BgSurface,
-    surfaceVariant = BgSurfaceRaised,
     primary = AccentSignal,
-    onPrimary = Color(0xFF00281A),
-    onBackground = TextPrimary,
-    onSurface = TextPrimary,
+    onPrimary = Color(0xFF002A18),
+    primaryContainer = Color(0xFF0D4A2C),
+    onPrimaryContainer = Color(0xFFB8FFD4),
+
     secondary = InterfaceCellular,
+    onSecondary = Color(0xFF24113E),
+    secondaryContainer = Color(0xFF3C2460),
+    onSecondaryContainer = Color(0xFFEADBFF),
+
+    background = BgBase,
+    onBackground = TextPrimary,
+    surface = BgSurface,
+    onSurface = TextPrimary,
+    surfaceVariant = BgSurfaceRaised,
+    onSurfaceVariant = TextSecondary,
+
+    outline = HairlineColor,
+    outlineVariant = Color(0xFF46525F),
+
     error = AccentDanger,
-    outline = HairlineColor
+    onError = Color(0xFF3A0004)
 )
 
 @Composable

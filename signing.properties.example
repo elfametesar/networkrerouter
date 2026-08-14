@@ -1,0 +1,6 @@
+# Copy this file to signing.properties and fill in your release key details.
+# signing.properties is gitignored.
+storeFile=release.keystore
+storePassword=CHANGE_ME
+keyAlias=ip-rerouter
+keyPassword=CHANGE_ME
