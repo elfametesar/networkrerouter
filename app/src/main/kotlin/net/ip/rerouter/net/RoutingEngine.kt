@@ -4,7 +4,6 @@ import net.ip.rerouter.model.RouteRule
 import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.root.RootShell
 
-/** Result of applying a rule: whether it succeeded, and if not, which command failed and why. */
 data class RuleApplyResult(
     val isSuccess: Boolean,
     val failedCommand: String? = null,
@@ -34,21 +33,33 @@ class RoutingEngine {
         return (max downTo min).firstOrNull { it > 0 && it !in used }
     }
 
-    /** Find the earliest Android local-traffic policy rule which can consume packets after netd marks them. */
-    private suspend fun findLocalPolicyCeiling(): Int? = ipRuleLines()
+    /** Lowest non-local policy priority currently installed by Android. */
+    private suspend fun findPolicyFloor(): Int? = ipRuleLines()
         .mapNotNull { line ->
             val priority = line.substringBefore(":").trim().toIntOrNull() ?: return@mapNotNull null
             if (priority <= 0) return@mapNotNull null
-            if (line.contains("iif lo") && line.contains("fwmark")) priority else null
+            if (line.contains("lookup ") || line.contains("table ")) priority else null
         }
+        .filter { it > 0 }
         .minOrNull()
 
-    /** Pick the highest free priority immediately before the first Android fwmark/iif-lo rule. */
-    private suspend fun findLocalEgressPriority(): Int? {
-        val ceiling = findLocalPolicyCeiling()
-        if (ceiling == null) return findFreePriority(1, 19999)
-        if (ceiling <= 1) return null
-        return findFreePriority(1, ceiling - 1)
+    /**
+     * Local device traffic must beat Android's fwmark rules. Pick a free
+     * priority immediately before the first policy rule, entirely from the
+     * live kernel topology; no device-specific constant is used.
+     */
+    private suspend fun findLocalEgressPriority(exclusionCount: Int): Int? {
+        val floor = findPolicyFloor() ?: return findFreePriority(1, 9999 - exclusionCount)
+        if (floor <= exclusionCount + 1) return null
+        val upper = floor - 1
+        val candidates = mutableListOf<Int>()
+        var cursor = upper
+        while (cursor > 0 && candidates.size < exclusionCount + 1) {
+            val used = ipRuleLines().mapNotNull { it.substringBefore(":").trim().toIntOrNull() }.toSet()
+            if (cursor !in used) candidates.add(cursor)
+            cursor--
+        }
+        return if (candidates.size == exclusionCount + 1) candidates.last() else null
     }
 
     private suspend fun findIifLoTableRules(table: Int): List<Int> = ipRuleLines().mapNotNull { line ->
@@ -73,7 +84,6 @@ class RoutingEngine {
         if (line.contains("from all iif $interfaceName ") && line.contains("lookup $table")) line.substringBefore(":").trim().toIntOrNull() else null
     }
 
-    /** A hotspot route is defined by traffic ENTERING through the hotspot interface. */
     private fun hotspotEndpoints(rule: RouteRule): Pair<String, String>? {
         if (!isHotspotInterface(rule.fromInterface)) return null
         return rule.fromInterface to rule.toInterface
@@ -106,29 +116,30 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
-    /** Device-local routing using the live Android policy-rule topology. */
     private suspend fun applyLocalEgressRule(rule: RouteRule, table: Int, realRoutingTable: String?): List<String>? {
-        val localPriority = findLocalEgressPriority() ?: return null
+        val localPriority = findLocalEgressPriority(rule.excludedUids.size) ?: return null
         val commands = mutableListOf<String>()
 
+        // Exempted UIDs must be evaluated before the local tunnel rule so their
+        // upstream proxy/VPN sockets remain on the real network.
+        var uidPriority = localPriority
         if (!realRoutingTable.isNullOrBlank()) {
-            var offset = 1
             for (uid in rule.excludedUids) {
-                val priority = localPriority - offset
-                if (priority <= 0) return null
+                val priority = uidPriority
                 findUidTableRules(uid, realRoutingTable).forEach { old ->
                     commands.add("ip rule del priority $old 2>/dev/null || true")
                 }
                 commands.add("ip rule add uidrange $uid-$uid lookup ${shellQuote(realRoutingTable)} priority $priority")
-                offset++
+                uidPriority++
             }
         }
 
+        val tunnelPriority = uidPriority
         findIifLoTableRules(table).forEach { old ->
             commands.add("ip rule del priority $old 2>/dev/null || true")
         }
         commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
-        commands.add("ip rule add iif lo lookup $table priority $localPriority")
+        commands.add("ip rule add iif lo lookup $table priority $tunnelPriority")
         return commands
     }
 
@@ -155,7 +166,7 @@ class RoutingEngine {
             commands.add("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward")
         } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
             val localCommands = applyLocalEgressRule(rule, table, realRoutingTable)
-                ?: return RuleApplyResult(false, stderr = "Could not allocate a local policy priority from the device's current ip-rule topology")
+                ?: return RuleApplyResult(false, stderr = "Could not allocate priorities before Android policy rules for local routing")
             commands.addAll(localCommands)
         } else {
             val priority = findFreePriority(1200, 19999)
@@ -211,13 +222,16 @@ class RoutingEngine {
         return results.all { it.isSuccess }
     }
 
-    suspend fun exemptProxyApp(proxyUid: Int, realTable: String, priority: Int = 20400): Boolean = RootShell.exec("ip rule add uidrange $proxyUid-$proxyUid lookup ${shellQuote(realTable)} priority $priority 2>/dev/null || true").isSuccess
-    suspend fun removeProxyAppExemption(proxyUid: Int): Boolean = RootShell.exec("ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true").isSuccess
+    suspend fun exemptProxyApp(proxyUid: Int, realTable: String, priority: Int): Boolean =
+        RootShell.exec("ip rule add uidrange $proxyUid-$proxyUid lookup ${shellQuote(realTable)} priority $priority").isSuccess
+
+    suspend fun removeProxyAppExemption(proxyUid: Int): Boolean =
+        RootShell.exec("ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true").isSuccess
 
     suspend fun resetAll(rules: List<RouteRule>, createdInterfaces: List<String>, realRoutingTable: String? = null): Boolean {
         val teardown = rules.map { removeRule(it, realRoutingTable) }
         val cleanupCommands = mutableListOf<String>()
-        cleanupCommands.add("for c in \\$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \\${'$'}c 2>/dev/null; iptables -t mangle -X \\${'$'}c 2>/dev/null; done")
+        cleanupCommands.add("for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \\${'$'}c 2>/dev/null; iptables -t mangle -X \\${'$'}c 2>/dev/null; done")
         for (name in createdInterfaces) cleanupCommands.add("ip link delete ${shellQuote(name)} 2>/dev/null || true")
         cleanupCommands.add("echo 0 > /proc/sys/net/ipv4/ip_forward")
         val cleanupResults = RootShell.execSequential(cleanupCommands)
