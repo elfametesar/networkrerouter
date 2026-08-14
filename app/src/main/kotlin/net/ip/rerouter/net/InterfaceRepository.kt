@@ -27,7 +27,6 @@ class InterfaceRepository {
         val stats = parseProcNetDev(statsResult.out)
 
         if (!addrResult.isSuccess || addrResult.out.isEmpty()) {
-            // Fallback: no `ip -j` support (unlikely, but be defensive). Parse plain `ip addr`.
             return parsePlainIpAddr(appCreatedNames, stats)
         }
 
@@ -115,7 +114,7 @@ class InterfaceRepository {
             )
         }
 
-        val ifaceHeader = Regex("""^\d+:\s+([^:@]+)(@\S+)?:\s+<([^>]*)>.*mtu (\d+)""")
+        val ifaceHeader = Regex("""^\\d+:\\s+([^:@]+)(@\\S+)?:\\s+<([^>]*)>.*mtu (\\d+)""")
         for (line in plain.out) {
             val headerMatch = ifaceHeader.find(line)
             if (headerMatch != null) {
@@ -147,12 +146,7 @@ class InterfaceRepository {
         return interfaces
     }
 
-    /**
-     * Creates a new tun interface owned by the app, optionally assigning an
-     * IPv4 address (CIDR form, e.g. "10.0.85.1/24") once the device exists.
-     * Address assignment must happen after `ip tuntap add`, since the
-     * interface doesn't exist yet beforehand.
-     */
+    /** Creates a new tun interface owned by the app, optionally assigning an IPv4 address. */
     suspend fun createTunInterface(name: String, ipCidr: String? = null): Boolean {
         val createResult = RootShell.exec("ip tuntap add dev $name mode tun")
         if (!createResult.isSuccess) return false
@@ -198,23 +192,64 @@ class InterfaceRepository {
         return result.isSuccess
     }
 
-    /**
-     * Detects whether an interface is a hotspot/tethering interface.
-     * Android exposes hotspot clients as wlan-prefixed names distinct from
-     * the station wifi interface (commonly wlan0).
-     */
+    /** Detects whether an interface is a hotspot/tethering interface. */
     fun isHotspotInterface(name: String): Boolean =
         name.startsWith("wlan") && name != "wlan0"
 
     /**
-     * Tries to detect the real routing table used by the device's cellular/primary connection.
-     * Common names: rmnet_data0, rmnet_data2, ccmni0, radio0. Used for proxy app exemption.
-     * Returns the first cellular interface found, or null if none found.
+     * Detects the numeric routing table that actually carries the device's
+     * primary cellular traffic. Do not return the interface name here: Android
+     * interface names (e.g. rmnet_mhi0) are not necessarily valid iproute2
+     * routing-table names. The routing engine uses this value for UID
+     * exemptions, so it must be a numeric table ID (or a name backed by
+     * rt_tables).
+     *
+     * Resolution order:
+     *  1. Look for a default route on an active cellular interface in `ip route
+     *     show table all` and extract its table token.
+     *  2. If the token is a named table, resolve it through rt_tables.
+     *  3. Fall back to the kernel policy rules: inspect every numeric lookup
+     *     table and select one whose default route uses the cellular interface.
      */
     suspend fun detectRealRoutingTable(): String? {
-        val interfaces = listInterfaces(emptySet())
-        return interfaces.firstOrNull {
-            it.kind == InterfaceKind.CELLULAR && it.isUp
-        }?.name
+        val cellular = listInterfaces(emptySet())
+            .firstOrNull { it.kind == InterfaceKind.CELLULAR && it.isUp }
+            ?.name
+            ?: return null
+
+        val routeLines = RootShell.exec("ip route show table all").out
+        val tableNameToId = mutableMapOf<String, String>()
+        RootShell.exec("cat /etc/iproute2/rt_tables /system/etc/iproute2/rt_tables 2>/dev/null").out.forEach { line ->
+            val clean = line.substringBefore('#').trim()
+            val parts = clean.split(Regex("\\s+"))
+            val id = parts.getOrNull(0)?.toIntOrNull()
+            val name = parts.getOrNull(1)
+            if (id != null && !name.isNullOrBlank()) tableNameToId[name] = id.toString()
+        }
+
+        val defaultRoute = routeLines.firstOrNull { line ->
+            line.trimStart().startsWith("default ") && Regex("\\bdev\\s+${Regex.escape(cellular)}(?:\\s|$)").containsMatchIn(line)
+        }
+        if (defaultRoute != null) {
+            val token = Regex("\\btable\\s+(\\S+)").find(defaultRoute)?.groupValues?.getOrNull(1)
+            if (!token.isNullOrBlank()) {
+                token.toIntOrNull()?.let { return it.toString() }
+                tableNameToId[token]?.let { return it }
+            }
+        }
+
+        // Android's `ip rule` may expose a named table even when the name is
+        // not in rt_tables. Probe the numeric tables instead of passing the
+        // interface name (which is exactly what caused `invalid table ID`).
+        for (table in 100..252) {
+            val result = RootShell.exec("ip route show table $table")
+            if (result.out.any { line ->
+                    line.trimStart().startsWith("default ") &&
+                        Regex("\\bdev\\s+${Regex.escape(cellular)}(?:\\s|$)").containsMatchIn(line)
+                }) {
+                return table.toString()
+            }
+        }
+        return null
     }
 }
