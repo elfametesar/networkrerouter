@@ -35,7 +35,6 @@ import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.ui.theme.AccentSignal
 import net.ip.rerouter.ui.theme.AppType
 import net.ip.rerouter.ui.theme.BgSurfaceRaised
-import net.ip.rerouter.ui.theme.TextSecondary
 
 @Composable
 fun CreateRuleDialog(
@@ -60,6 +59,9 @@ fun CreateRuleDialog(
     var proxyMenuOpen by remember { mutableStateOf(false) }
     var selectedProxyApp by remember { mutableStateOf<AppInfo?>(null) }
     var includeHotspot by remember { mutableStateOf(false) }
+    var showSystemApps by remember { mutableStateOf(false) }
+
+    val visibleApps = apps.filter { showSystemApps || !it.isSystemApp }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -77,10 +79,10 @@ fun CreateRuleDialog(
                     Text("From", style = AppType.sectionLabel)
                     Spacer(Modifier.height(6.dp))
                     InterfacePicker(
-                        interfaces = interfaces, 
-                        selected = from, 
+                        interfaces = interfaces,
+                        selected = from,
                         expanded = fromMenuOpen,
-                        onExpandedChange = { fromMenuOpen = it }, 
+                        onExpandedChange = { fromMenuOpen = it },
                         onSelect = { from = it; fromMenuOpen = false }
                     )
                 }
@@ -91,10 +93,10 @@ fun CreateRuleDialog(
                     Text("Routes out through", style = AppType.sectionLabel)
                     Spacer(Modifier.height(6.dp))
                     InterfacePicker(
-                        interfaces = interfaces, 
-                        selected = to, 
+                        interfaces = interfaces,
+                        selected = to,
                         expanded = toMenuOpen,
-                        onExpandedChange = { toMenuOpen = it }, 
+                        onExpandedChange = { toMenuOpen = it },
                         onSelect = { to = it; toMenuOpen = false }
                     )
                 }
@@ -105,10 +107,11 @@ fun CreateRuleDialog(
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Masquerade (NAT)", style = AppType.body)
-                            Text("Rewrite source address to tunnel's IP", style = AppType.dataSecondary)
+                            Text("Rewrite source address when forwarding", style = AppType.dataSecondary)
                         }
                         Switch(
-                            checked = masquerade, onCheckedChange = { masquerade = it },
+                            checked = masquerade,
+                            onCheckedChange = { masquerade = it },
                             colors = SwitchDefaults.colors(checkedTrackColor = AccentSignal)
                         )
                     }
@@ -121,13 +124,13 @@ fun CreateRuleDialog(
                         Column(Modifier.weight(1f)) {
                             Text("Route hotspot clients too", style = AppType.body)
                             Text(
-                                if (includeHotspot) "Hotspot traffic → tunnel"
-                                else "Only device local traffic → tunnel",
+                                if (includeHotspot) "Hotspot traffic → tunnel" else "Only device local traffic → tunnel",
                                 style = AppType.dataSecondary
                             )
                         }
                         Switch(
-                            checked = includeHotspot, onCheckedChange = { includeHotspot = it },
+                            checked = includeHotspot,
+                            onCheckedChange = { includeHotspot = it },
                             colors = SwitchDefaults.colors(checkedTrackColor = AccentSignal)
                         )
                     }
@@ -139,7 +142,7 @@ fun CreateRuleDialog(
                     Text("Proxy app (optional)", style = AppType.sectionLabel)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Exempt a proxy/VPN app to prevent deadlock when its own traffic routes into itself",
+                        "Exempt a proxy/VPN app so its own connection continues over the real network",
                         style = AppType.dataSecondary
                     )
                     Spacer(Modifier.height(8.dp))
@@ -158,23 +161,19 @@ fun CreateRuleDialog(
                             onDismissRequest = { proxyMenuOpen = false },
                             title = { Text("Select proxy app", style = AppType.displayTitle) },
                             text = {
-                                if (apps.isEmpty()) {
+                                if (visibleApps.isEmpty()) {
                                     Text("No apps found.", style = AppType.bodySecondary)
                                 } else {
                                     LazyColumn(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(max = 300.dp)
+                                        modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp)
                                     ) {
-                                        items(apps, key = { it.uid }) { app ->
+                                        items(visibleApps, key = { it.uid }) { app ->
                                             OutlinedButton(
                                                 onClick = {
                                                     selectedProxyApp = app
                                                     proxyMenuOpen = false
                                                 },
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(vertical = 3.dp),
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                                 shape = RoundedCornerShape(10.dp)
                                             ) {
                                                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -189,9 +188,7 @@ fun CreateRuleDialog(
                                                     selectedProxyApp = null
                                                     proxyMenuOpen = false
                                                 },
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(vertical = 8.dp),
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                                                 shape = RoundedCornerShape(10.dp)
                                             ) {
                                                 Text("None (no exemption)", style = AppType.dataPrimary)
@@ -201,9 +198,7 @@ fun CreateRuleDialog(
                                 }
                             },
                             confirmButton = {
-                                TextButton(onClick = { proxyMenuOpen = false }) {
-                                    Text("Cancel")
-                                }
+                                TextButton(onClick = { proxyMenuOpen = false }) { Text("Close") }
                             }
                         )
                     }
@@ -212,17 +207,28 @@ fun CreateRuleDialog(
                 item { Spacer(Modifier.height(14.dp)) }
 
                 item {
-                    Text("Exclude apps (${excluded.size})", style = AppType.sectionLabel)
-                    Spacer(Modifier.height(6.dp))
-                    if (apps.isEmpty()) {
-                        Text(
-                            "No installed apps found",
-                            style = AppType.bodySecondary,
-                            modifier = Modifier.padding(vertical = 10.dp)
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Exclude apps (${excluded.size})", style = AppType.sectionLabel)
+                            Text("Excluded apps bypass this route", style = AppType.dataSecondary)
+                        }
+                        Switch(
+                            checked = showSystemApps,
+                            onCheckedChange = { showSystemApps = it },
+                            colors = SwitchDefaults.colors(checkedTrackColor = AccentSignal)
                         )
+                    }
+                    Text(
+                        if (showSystemApps) "Showing user + system apps" else "Showing user apps only",
+                        style = AppType.dataSecondary,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    if (visibleApps.isEmpty()) {
+                        Text("No installed apps found", style = AppType.bodySecondary, modifier = Modifier.padding(vertical = 10.dp))
                     } else {
-                        LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                            items(apps, key = { it.uid }) { app ->
+                        LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+                            items(visibleApps, key = { it.uid }) { app ->
                                 AppExcludeRow(
                                     app = app,
                                     checked = app.uid in excluded,
@@ -270,10 +276,7 @@ private fun InterfacePicker(
         onClick = { onExpandedChange(true) },
         modifier = Modifier.fillMaxWidth()
     ) {
-        Text(
-            selected.ifEmpty { "Select interface" },
-            style = AppType.dataPrimary
-        )
+        Text(selected.ifEmpty { "Select interface" }, style = AppType.dataPrimary)
     }
 
     if (expanded) {
@@ -284,17 +287,11 @@ private fun InterfacePicker(
                 if (interfaces.isEmpty()) {
                     Text("No network interfaces found.", style = AppType.bodySecondary)
                 } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 420.dp)
-                    ) {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
                         items(interfaces, key = { it.name }) { iface ->
                             OutlinedButton(
                                 onClick = { onSelect(iface.name) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 3.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -316,9 +313,7 @@ private fun InterfacePicker(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { onExpandedChange(false) }) {
-                    Text("Cancel")
-                }
+                TextButton(onClick = { onExpandedChange(false) }) { Text("Close") }
             }
         )
     }
@@ -328,17 +323,19 @@ private fun InterfacePicker(
 private fun AppExcludeRow(app: AppInfo, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp)
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
     ) {
         Checkbox(
-            checked = checked, onCheckedChange = onCheckedChange,
+            checked = checked,
+            onCheckedChange = onCheckedChange,
             colors = CheckboxDefaults.colors(checkedColor = AccentSignal)
         )
         Column {
             Text(app.label, style = AppType.body)
-            Text(app.packageName, style = AppType.dataSecondary)
+            Text(
+                if (app.isSystemApp) "${app.packageName}  •  system" else app.packageName,
+                style = AppType.dataSecondary
+            )
         }
     }
 }
