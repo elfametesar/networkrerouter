@@ -26,21 +26,6 @@ class RoutingEngine {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
-    /** Any interface carrying a current default route is an egress selector.
-     * Local sockets are born on lo, so the proven generic implementation is
-     * iif lo -> policy table -> selected tunnel. */
-    private suspend fun hasDefaultRouteOnInterface(interfaceName: String): Boolean {
-        val v4 = RootShell.exec(
-            "ip route show default dev ${shellQuote(interfaceName)} 2>/dev/null"
-        )
-        if (v4.isSuccess && v4.out.any { it.trim().startsWith("default") }) return true
-
-        val v6 = RootShell.exec(
-            "ip -6 route show default dev ${shellQuote(interfaceName)} 2>/dev/null"
-        )
-        return v6.isSuccess && v6.out.any { it.trim().startsWith("default") }
-    }
-
     private suspend fun findFreePriority(min: Int, max: Int): Int? {
         val used = RootShell.exec("ip rule").out.mapNotNull { line ->
             line.substringBefore(":").trim().toIntOrNull()
@@ -136,8 +121,6 @@ class RoutingEngine {
         val localPriority = findFreePriority(20001, 20999) ?: return null
         val commands = mutableListOf<String>()
 
-        /* UID exceptions are placed before the broad iif lo rule and continue
-         * through Android's existing real network table. */
         if (!realRoutingTable.isNullOrBlank()) {
             var offset = 1
             for (uid in rule.excludedUids) {
@@ -164,12 +147,9 @@ class RoutingEngine {
 
     suspend fun applyRule(rule: RouteRule, realRoutingTable: String? = null): Boolean {
         val table = rule.tableId
-        val mark = table
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
-        val localEgress = hotspot == null &&
-            rule.sourceType == SourceInterfaceType.LOCAL_ONLY &&
-            hasDefaultRouteOnInterface(rule.fromInterface)
+        val localEgress = hotspot == null && rule.sourceType == SourceInterfaceType.LOCAL_ONLY
         val commands = mutableListOf<String>()
 
         if (hotspot != null) {
@@ -219,9 +199,9 @@ class RoutingEngine {
             for (uid in rule.excludedUids) {
                 commands.add("iptables -t mangle -A $chain -m owner --uid-owner $uid -j RETURN")
             }
-            commands.add("iptables -t mangle -A $chain -j MARK --set-mark $mark")
-            commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
-            commands.add("ip rule add fwmark $mark table $table priority $priority")
+            commands.add("iptables -t mangle -A $chain -j MARK --set-mark ${table}")
+            commands.add("ip rule del fwmark ${table} table $table 2>/dev/null || true")
+            commands.add("ip rule add fwmark ${table} table $table priority $priority")
             commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
             if (rule.useMasquerade) {
                 commands.add(
