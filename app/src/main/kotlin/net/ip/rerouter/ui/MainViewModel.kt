@@ -89,14 +89,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Pick a table ID that is not already assigned in Android's named table
+     * registry, not present in policy rules, and not used by one of our rules.
+     */
     private suspend fun allocateRoutingTable(): Int? {
         val usedByRules = appState.rules.map { it.tableId }.toSet()
+
+        val rtTables = RootShell.exec("cat /etc/iproute2/rt_tables /system/etc/iproute2/rt_tables 2>/dev/null").out
+            .mapNotNull { line ->
+                val clean = line.substringBefore('#').trim()
+                val parts = clean.split(Regex("\\s+"))
+                parts.firstOrNull()?.toIntOrNull()
+            }
+            .toSet()
+
         val usedByKernel = RootShell.exec("ip rule").out.mapNotNull { line ->
-            val lookup = Regex("(?:lookup|table)\\s+([0-9]+)").find(line)
+            val lookup = Regex("(?:lookup|table)\\s+([^\\s]+)").find(line)
             lookup?.groupValues?.getOrNull(1)?.toIntOrNull()
         }.toSet()
+
+        val used = usedByRules + rtTables + usedByKernel
         for (table in 100..252) {
-            if (table !in usedByRules && table !in usedByKernel) return table
+            if (table !in used) return table
         }
         return null
     }
