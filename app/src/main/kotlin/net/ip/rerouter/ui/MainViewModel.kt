@@ -15,6 +15,7 @@ import net.ip.rerouter.model.AppInfo
 import net.ip.rerouter.model.AppState
 import net.ip.rerouter.model.NetInterface
 import net.ip.rerouter.model.RouteRule
+import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.net.AppRepository
 import net.ip.rerouter.net.InterfaceRepository
 import net.ip.rerouter.net.RoutingEngine
@@ -28,7 +29,8 @@ data class UiState(
     val rules: List<RouteRule> = emptyList(),
     val installedApps: List<AppInfo> = emptyList(),
     val isLoading: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val realRoutingTable: String? = null
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -53,6 +55,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             appState = stateStore.load()
             _uiState.value = _uiState.value.copy(rules = appState.rules)
+
+            // Detect the real routing table for proxy app exemption
+            val realTable = interfaceRepo.detectRealRoutingTable()
+            _uiState.value = _uiState.value.copy(realRoutingTable = realTable)
 
             refreshInterfaces(showLoading = true)
             loadApps()
@@ -168,7 +174,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fromInterface: String,
         toInterface: String,
         excludedUids: Set<Int>,
-        useMasquerade: Boolean
+        useMasquerade: Boolean,
+        proxyAppPackage: String? = null,
+        sourceType: SourceInterfaceType = SourceInterfaceType.LOCAL_ONLY
     ) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
@@ -194,11 +202,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 toInterface = toInterface,
                 tableId = tableId,
                 excludedUids = excludedUids,
-                useMasquerade = useMasquerade
+                useMasquerade = useMasquerade,
+                proxyAppPackage = proxyAppPackage,
+                sourceType = sourceType
             )
 
             val ok = routingEngine.applyRule(rule)
-            if (ok) {
+            
+            // If proxy app was specified, exempt it
+            var proxyExemptionOk = true
+            if (ok && proxyAppPackage != null) {
+                val proxyUid = appRepo.getUidForPackage(proxyAppPackage)
+                val realTable = _uiState.value.realRoutingTable ?: "rmnet_data0"
+                if (proxyUid != null) {
+                    proxyExemptionOk = routingEngine.exemptProxyApp(proxyUid, realTable)
+                }
+            }
+
+            if (ok && proxyExemptionOk) {
                 appState = appState.copy(
                     rules = appState.rules + rule,
                     nextTableId = if (tableId >= 252) 100 else tableId + 1
@@ -223,7 +244,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(isLoading = true)
 
             val ok = routingEngine.removeRule(rule)
-            if (ok) {
+            
+            // If this rule had a proxy app exemption, remove it
+            var proxyCleanupOk = true
+            if (ok && rule.proxyAppPackage != null) {
+                val proxyUid = appRepo.getUidForPackage(rule.proxyAppPackage)
+                if (proxyUid != null) {
+                    proxyCleanupOk = routingEngine.removeProxyAppExemption(proxyUid)
+                }
+            }
+
+            if (ok && proxyCleanupOk) {
                 appState = appState.copy(rules = appState.rules - rule)
                 stateStore.save(appState)
                 _uiState.value = _uiState.value.copy(
@@ -274,6 +305,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             routingEngine.resetAll(appState.rules, appState.createdInterfaces)
+            
+            // Clean up proxy app exemptions
+            for (rule in appState.rules) {
+                if (rule.proxyAppPackage != null) {
+                    val proxyUid = appRepo.getUidForPackage(rule.proxyAppPackage)
+                    if (proxyUid != null) {
+                        routingEngine.removeProxyAppExemption(proxyUid)
+                    }
+                }
+            }
+            
             appState = AppState()
             stateStore.save(appState)
             refreshInterfaces(showLoading = false)

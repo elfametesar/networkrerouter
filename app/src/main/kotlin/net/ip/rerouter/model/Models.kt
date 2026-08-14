@@ -35,6 +35,14 @@ enum class InterfaceKind {
     }
 }
 
+/** Specifies whether a rule applies to local traffic only or includes hotspot clients. */
+enum class SourceInterfaceType {
+    /** Only route local apps' traffic through this rule. */
+    LOCAL_ONLY,
+    /** Route both local apps and hotspot clients through this rule. */
+    LOCAL_AND_HOTSPOT
+}
+
 /** A routing rule the user has created: forward/route traffic from one interface to another. */
 @Serializable
 data class RouteRule(
@@ -46,7 +54,22 @@ data class RouteRule(
     val tableId: Int,
     /** UIDs of apps excluded from this specific rule. */
     val excludedUids: Set<Int> = emptySet(),
-    val useMasquerade: Boolean = true
+    val useMasquerade: Boolean = true,
+    /** Package name of proxy app to exempt (if any) to prevent deadlock. */
+    val proxyAppPackage: String? = null,
+    /** Whether to include hotspot clients in this rule. */
+    val sourceType: SourceInterfaceType = SourceInterfaceType.LOCAL_ONLY
+)
+
+/** Configuration for proxy app exemption: prevents proxy's own traffic from being routed into itself. */
+@Serializable
+data class ProxyAppConfig(
+    /** Package name to exempt (e.g., "com.v2raytun.android"). */
+    val packageName: String,
+    /** Runtime UID looked up from PackageManager. */
+    val uid: Int? = null,
+    /** Routing table for proxy's real traffic to use (e.g., "rmnet_data0"). */
+    val realTable: String = "rmnet_data0"
 )
 
 /** An installed app, for the exclusion picker. */
