@@ -27,13 +27,10 @@ android {
 
     signingConfigs {
         create("release") {
-            val storeFilePath = signingProperties.getProperty("storeFile")
-            if (!storeFilePath.isNullOrBlank()) {
-                storeFile = rootProject.file(storeFilePath)
-                storePassword = signingProperties.getProperty("storePassword")
-                keyAlias = signingProperties.getProperty("keyAlias")
-                keyPassword = signingProperties.getProperty("keyPassword")
-            }
+            storeFile = rootProject.file("release.keystore")
+            storePassword = "netmander-release"
+            keyAlias = "netmander"
+            keyPassword = "netmander-release"
         }
     }
 
