@@ -88,7 +88,10 @@ class RoutingEngine {
     }
 
     private suspend fun applyLocalEgressRule(rule: RouteRule, table: Int, realRoutingTable: String?): List<String>? {
-        val localPriority = findFreePriority(20001, 20999) ?: return null
+        // Match the known-good device-local routing setup first: 20500 is
+        // intentionally preferred because Android's tethering rules commonly
+        // occupy 21000+ while this sits above the usual 17000 rules.
+        val localPriority = findFreePriority(20500, 20500) ?: findFreePriority(20001, 20999) ?: return null
         val commands = mutableListOf<String>()
         if (!realRoutingTable.isNullOrBlank()) {
             var offset = 1
