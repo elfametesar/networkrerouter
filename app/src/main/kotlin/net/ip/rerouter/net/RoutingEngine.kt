@@ -111,8 +111,14 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
-    /** Reproduces the user's known-working local-device routing script:
-     * default dev tunnel in a custom table + iif lo policy rule. */
+    /**
+     * Local/device traffic follows the exact working script model:
+     *   ip route replace default dev TUN table X
+     *   ip rule add iif lo lookup X priority P
+     *
+     * The selected source interface is the user's desired/normal egress;
+     * local packets enter policy routing through lo.
+     */
     private suspend fun applyLocalEgressRule(
         rule: RouteRule,
         table: Int,
@@ -149,7 +155,6 @@ class RoutingEngine {
         val table = rule.tableId
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
-        val localEgress = hotspot == null && rule.sourceType == SourceInterfaceType.LOCAL_ONLY
         val commands = mutableListOf<String>()
 
         if (hotspot != null) {
@@ -185,7 +190,7 @@ class RoutingEngine {
                 )
             }
             commands.add("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward")
-        } else if (localEgress) {
+        } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
             val localCommands = applyLocalEgressRule(rule, table, realRoutingTable) ?: return false
             commands.addAll(localCommands)
         } else {
@@ -199,9 +204,9 @@ class RoutingEngine {
             for (uid in rule.excludedUids) {
                 commands.add("iptables -t mangle -A $chain -m owner --uid-owner $uid -j RETURN")
             }
-            commands.add("iptables -t mangle -A $chain -j MARK --set-mark ${table}")
-            commands.add("ip rule del fwmark ${table} table $table 2>/dev/null || true")
-            commands.add("ip rule add fwmark ${table} table $table priority $priority")
+            commands.add("iptables -t mangle -A $chain -j MARK --set-mark $table")
+            commands.add("ip rule del fwmark $table table $table 2>/dev/null || true")
+            commands.add("ip rule add fwmark $table table $table priority $priority")
             commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
             if (rule.useMasquerade) {
                 commands.add(
@@ -220,7 +225,6 @@ class RoutingEngine {
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
-        val localEgress = hotspot == null && rule.sourceType == SourceInterfaceType.LOCAL_ONLY
         val commands = mutableListOf<String>()
 
         if (hotspot != null) {
@@ -235,7 +239,7 @@ class RoutingEngine {
             commands.add("iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true")
             commands.add("iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || true")
             restoreRpFilter(hotspotInterface, tunnelInterface)
-        } else if (localEgress) {
+        } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
             findIifLoTableRules(table).forEach { priority ->
                 commands.add("ip rule del priority $priority 2>/dev/null || true")
             }
