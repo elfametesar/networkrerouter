@@ -50,15 +50,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rootOk = RootShell.isRootAvailable()
             _uiState.value = _uiState.value.copy(hasRoot = rootOk)
-
             if (!rootOk) return@launch
 
             appState = stateStore.load()
             _uiState.value = _uiState.value.copy(rules = appState.rules)
-
             val realTable = interfaceRepo.detectRealRoutingTable()
             _uiState.value = _uiState.value.copy(realRoutingTable = realTable)
-
             refreshInterfaces(showLoading = true)
             loadApps()
 
@@ -92,14 +89,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Pick a routing table not currently referenced by Android or by an active rule. */
     private suspend fun allocateRoutingTable(): Int? {
         val usedByRules = appState.rules.map { it.tableId }.toSet()
         val usedByKernel = RootShell.exec("ip rule").out.mapNotNull { line ->
             val lookup = Regex("(?:lookup|table)\\s+([0-9]+)").find(line)
             lookup?.groupValues?.getOrNull(1)?.toIntOrNull()
         }.toSet()
-
         for (table in 100..252) {
             if (table !in usedByRules && table !in usedByKernel) return table
         }
@@ -160,7 +155,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
-
             val liveInterfaces = interfaceRepo.listInterfaces(appState.createdInterfaces.toSet())
             val liveNames = liveInterfaces.map { it.name }.toSet()
             if (fromInterface !in liveNames || toInterface !in liveNames) {
@@ -174,10 +168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             val tableId = allocateRoutingTable()
             if (tableId == null) {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = "No free routing table ID is available"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "No free routing table ID is available")
                 return@launch
             }
 
@@ -206,9 +197,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 stateStore.save(appState)
                 _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
             } else {
+                val diagnostics = RootShell.exec("ip rule; echo ---; ip route show table $tableId").out
+                    .takeLast(12).joinToString(" | ")
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    errorMessage = "Failed to apply route: $fromInterface → $toInterface"
+                    errorMessage = "Failed to apply $fromInterface → $toInterface (table $tableId). $diagnostics"
                 )
             }
         }
@@ -224,10 +217,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 stateStore.save(appState)
                 _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = "Failed to remove route ${rule.fromInterface} → ${rule.toInterface}"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "Failed to remove route ${rule.fromInterface} → ${rule.toInterface}")
             }
         }
     }
@@ -236,16 +226,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rule = appState.rules.firstOrNull { it.id == ruleId } ?: return@launch
             _uiState.value = _uiState.value.copy(isLoading = true)
-            val ok = if (enabled) {
-                routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
-            } else {
-                routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
-            }
+            val ok = if (enabled) routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
+            else routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
             if (!ok) {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = "Failed to ${if (enabled) "enable" else "disable"} route"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "Failed to ${if (enabled) "enable" else "disable"} route")
                 return@launch
             }
             val updated = rule.copy(enabled = enabled)
