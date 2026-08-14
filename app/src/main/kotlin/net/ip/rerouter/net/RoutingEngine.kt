@@ -172,7 +172,12 @@ class RoutingEngine {
                 commands.add("ip rule del priority $priority 2>/dev/null || true")
             }
             commands.add("ip route replace default dev ${shellQuote(tunnelInterface)} table $table")
-            val priority = findHotspotPolicyPriority(hotspotInterface) ?: return false
+            val priority = findHotspotPolicyPriority(hotspotInterface)
+                ?: return RuleApplyResult(
+                    false,
+                    failedCommand = null,
+                    stderr = "No free policy-routing priority found for hotspot interface"
+                )
             commands.add("ip rule add iif ${shellQuote(hotspotInterface)} lookup $table priority $priority")
             commands.add(
                 "iptables -C tetherctrl_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -j ACCEPT 2>/dev/null || " +
@@ -199,7 +204,7 @@ class RoutingEngine {
             commands.add("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward")
         } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
             val localCommands = applyLocalEgressRule(rule, table, realRoutingTable)
-                ?: return RuleApplyResult(false, failedCommand = null, stderr = "No free priority in range 20001-19999 for local egress rule, or excluded UID priority underflowed")
+                ?: return RuleApplyResult(false, failedCommand = null, stderr = "No free priority in range 20001-20999 for local egress rule, or excluded UID priority underflowed")
             commands.addAll(localCommands)
         } else {
             val priority = findFreePriority(1200, 19999)
