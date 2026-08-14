@@ -22,11 +22,6 @@ class RoutingEngine {
         else -> false
     }
 
-    /**
-     * A cellular interface is an egress/WAN interface, not an ingress source
-     * for locally-generated traffic. For rules such as rmnet_data3 -> tun1,
-     * the phone's own sockets must therefore be marked in OUTPUT.
-     */
     private fun isCellularInterface(name: String): Boolean = when {
         name.startsWith("rmnet") -> true
         name.startsWith("ccmni") -> true
@@ -35,7 +30,7 @@ class RoutingEngine {
     }
 
     private fun shellQuote(value: String): String =
-        "'" + value.replace("'", "'\\''") + "'"
+        "'" + value.replace("'", "'\''") + "'"
 
     private suspend fun findHotspotPolicyPriority(interfaceName: String): Int? {
         val lines = RootShell.exec("ip rule").out
@@ -122,17 +117,10 @@ class RoutingEngine {
     }
 
     /**
-     * Routes locally-generated traffic that is currently associated with a
-     * cellular/WAN interface through the requested tunnel.
-     *
-     * Example:
-     *   rmnet_data3 -> tun1
-     *
-     * becomes:
-     *   local socket -> mangle OUTPUT -> fwmark -> policy table -> tun1
-     *
-     * This is deliberately different from `iif rmnet_data3`, because local
-     * traffic does not enter through rmnet_data3.
+     * For a cellular/WAN -> tunnel rule, locally generated traffic must be
+     * selected by the route it would normally take, not by input interface.
+     * We use the kernel's routing decision in OUTPUT and only mark packets
+     * whose current output interface is the selected WAN interface.
      */
     private suspend fun applyCellularToTunnelRule(
         rule: RouteRule,
@@ -142,24 +130,39 @@ class RoutingEngine {
     ): List<String> {
         val commands = mutableListOf<String>()
 
-        commands.add("iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain")
+        commands.add(
+            "iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain"
+        )
 
+        /* Never route loopback/local destinations into the tunnel. */
+        commands.add("iptables -t mangle -A $chain -m addrtype --dst-type LOCAL -j RETURN")
+
+        /* Exempt explicitly configured UIDs. */
         for (uid in rule.excludedUids) {
             commands.add(
                 "iptables -t mangle -A $chain -m owner --uid-owner $uid -j RETURN"
             )
         }
 
-        /* Attach our chain at the very front of OUTPUT so Android's own
-         * connmark/socket-mark processing cannot send the packet elsewhere
-         * before our route selection is made. */
+        /* Mark only packets whose current route is the selected WAN interface.
+         * This is the key difference from the previous implementation, which
+         * marked every OUTPUT packet and could route Xray's own upstream
+         * connection back into tun1. */
         commands.add(
-            "iptables -t mangle -C OUTPUT -j $chain 2>/dev/null || " +
-                "iptables -t mangle -I OUTPUT 1 -j $chain"
+            "iptables -t mangle -A $chain -m physdev --physdev-is-bridged -j RETURN 2>/dev/null || true"
         )
-        commands.add("iptables -t mangle -A $chain -j MARK --set-mark $mark")
-        commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
-        commands.add("ip rule add fwmark $mark table $table priority ${1000 + table}")
+        commands.add(
+            "iptables -t mangle -A $chain -o ${shellQuote(rule.fromInterface)} -j MARK --set-mark $mark"
+        )
+
+        /* If the packet wasn't already emitted through the selected WAN, leave
+         * it alone. Android will perform the normal route selection. */
+        commands.add(
+            "ip rule del fwmark $mark table $table 2>/dev/null || true"
+        )
+        commands.add(
+            "ip rule add fwmark $mark table $table priority ${1000 + table}"
+        )
         commands.add(
             "ip route replace default dev ${shellQuote(rule.toInterface)} table $table"
         )
@@ -263,85 +266,47 @@ class RoutingEngine {
 
         if (hotspot != null) {
             val (hotspotInterface, tunnelInterface) = hotspot
-
             findExistingHotspotRulePriorities(hotspotInterface, table)
-                .forEach { priority ->
-                    commands.add("ip rule del priority $priority 2>/dev/null || true")
-                }
+                .forEach { priority -> commands.add("ip rule del priority $priority 2>/dev/null || true") }
             commands.add("ip route flush table $table 2>/dev/null || true")
-            commands.add(
-                "iptables -D tetherctrl_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -j ACCEPT 2>/dev/null || true"
-            )
-            commands.add(
-                "iptables -D tetherctrl_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT 2>/dev/null || true"
-            )
-            commands.add(
-                "iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"
-            )
-            commands.add(
-                "iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"
-            )
-            commands.add(
-                "iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || true"
-            )
+            commands.add("iptables -D tetherctrl_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -j ACCEPT 2>/dev/null || true")
+            commands.add("iptables -D tetherctrl_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT 2>/dev/null || true")
+            commands.add("iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true")
+            commands.add("iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true")
+            commands.add("iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || true")
             restoreRpFilter(hotspotInterface, tunnelInterface)
         } else if (isCellularInterface(rule.fromInterface)) {
-            commands.add(
-                "iptables -t mangle -D OUTPUT -j $chain 2>/dev/null || true"
-            )
+            commands.add("iptables -t mangle -D OUTPUT -j $chain 2>/dev/null || true")
             commands.add("iptables -t mangle -F $chain 2>/dev/null || true")
             commands.add("iptables -t mangle -X $chain 2>/dev/null || true")
             commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
             commands.add("ip route flush table $table 2>/dev/null || true")
         } else {
-            commands.add(
-                "iptables -t mangle -D PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || true"
-            )
+            commands.add("iptables -t mangle -D PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || true")
             commands.add("iptables -t mangle -F $chain 2>/dev/null || true")
             commands.add("iptables -t mangle -X $chain 2>/dev/null || true")
             commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
             commands.add("ip route flush table $table 2>/dev/null || true")
-            commands.add(
-                "iptables -t nat -D POSTROUTING -o ${shellQuote(rule.toInterface)} -j MASQUERADE 2>/dev/null || true"
-            )
+            commands.add("iptables -t nat -D POSTROUTING -o ${shellQuote(rule.toInterface)} -j MASQUERADE 2>/dev/null || true")
         }
 
         val results = RootShell.execSequential(commands)
         return results.all { it.isSuccess }
     }
 
-    suspend fun exemptProxyApp(
-        proxyUid: Int,
-        realTable: String,
-        priority: Int = 20400
-    ): Boolean {
-        return RootShell.exec(
-            "ip rule add uidrange $proxyUid-$proxyUid lookup ${shellQuote(realTable)} priority $priority 2>/dev/null || true"
-        ).isSuccess
+    suspend fun exemptProxyApp(proxyUid: Int, realTable: String, priority: Int = 20400): Boolean {
+        return RootShell.exec("ip rule add uidrange $proxyUid-$proxyUid lookup ${shellQuote(realTable)} priority $priority 2>/dev/null || true").isSuccess
     }
 
     suspend fun removeProxyAppExemption(proxyUid: Int): Boolean {
-        return RootShell.exec(
-            "ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true"
-        ).isSuccess
+        return RootShell.exec("ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true").isSuccess
     }
 
-    suspend fun resetAll(
-        rules: List<RouteRule>,
-        createdInterfaces: List<String>
-    ): Boolean {
+    suspend fun resetAll(rules: List<RouteRule>, createdInterfaces: List<String>): Boolean {
         val teardown = rules.map { removeRule(it) }
         val cleanupCommands = mutableListOf<String>()
-
-        cleanupCommands.add(
-            "for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do " +
-                "iptables -t mangle -F \$c 2>/dev/null; iptables -t mangle -X \$c 2>/dev/null; done"
-        )
-
-        for (name in createdInterfaces) {
-            cleanupCommands.add("ip link delete ${shellQuote(name)} 2>/dev/null || true")
-        }
-
+        cleanupCommands.add("for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \$c 2>/dev/null; iptables -t mangle -X \$c 2>/dev/null; done")
+        for (name in createdInterfaces) cleanupCommands.add("ip link delete ${shellQuote(name)} 2>/dev/null || true")
         cleanupCommands.add("echo 0 > /proc/sys/net/ipv4/ip_forward")
         val cleanupResults = RootShell.execSequential(cleanupCommands)
         return teardown.all { it } && cleanupResults.all { it.isSuccess }
