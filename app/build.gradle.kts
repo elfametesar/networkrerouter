@@ -1,16 +1,8 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
-}
-
-val signingProperties = Properties()
-val signingPropertiesFile = rootProject.file("signing.properties")
-if (signingPropertiesFile.exists()) {
-    signingPropertiesFile.inputStream().use(signingProperties::load)
 }
 
 android {
@@ -27,19 +19,41 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = rootProject.file("release.keystore")
-            storePassword = "netmander-release"
-            keyAlias = "netmander"
-            keyPassword = "netmander-release"
+            val keystorePath = layout.buildDirectory.file("generated/release/release.keystore").get().asFile
+
+            if (!keystorePath.exists()) {
+                keystorePath.parentFile.mkdirs()
+
+                exec {
+                    commandLine(
+                        "keytool",
+                        "-genkeypair",
+                        "-v",
+                        "-keystore", keystorePath.absolutePath,
+                        "-storepass", "android",
+                        "-keypass", "android",
+                        "-alias", "androidrelease",
+                        "-keyalg", "RSA",
+                        "-keysize", "2048",
+                        "-validity", "10000",
+                        "-dname", "CN=Android,O=Android,C=US"
+                    )
+                }
+            }
+
+            storeFile = keystorePath
+            storePassword = "android"
+            keyAlias = "androidrelease"
+            keyPassword = "android"
         }
     }
 
     buildTypes {
         release {
-            // Release is intentionally signed when signing.properties is present.
-            // The build fails clearly instead of silently producing an unsigned APK.
-            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
+
+            signingConfig = signingConfigs.getByName("release")
+
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
