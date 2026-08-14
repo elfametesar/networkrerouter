@@ -87,11 +87,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadApps() {
         viewModelScope.launch {
-            /* Load system apps too; the dialog defaults to hiding them and lets
-             * the user opt in. QUERY_ALL_PACKAGES is declared in the manifest. */
             val apps = appRepo.listInstalledApps(includeSystemApps = true)
             _uiState.value = _uiState.value.copy(installedApps = apps)
         }
+    }
+
+    /** Pick a routing table not currently referenced by Android or by an active rule. */
+    private suspend fun allocateRoutingTable(): Int? {
+        val usedByRules = appState.rules.map { it.tableId }.toSet()
+        val usedByKernel = RootShell.exec("ip rule").out.mapNotNull { line ->
+            val lookup = Regex("(?:lookup|table)\\s+([0-9]+)").find(line)
+            lookup?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }.toSet()
+
+        for (table in 100..252) {
+            if (table !in usedByRules && table !in usedByKernel) return table
+        }
+        return null
     }
 
     fun createInterface(name: String, isDummy: Boolean, ipCidr: String? = null) {
@@ -160,12 +172,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            val tableId = allocateRoutingTable()
+            if (tableId == null) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "No free routing table ID is available"
+                )
+                return@launch
+            }
+
             var effectiveExcluded = excludedUids
             if (proxyAppPackage != null) {
                 appRepo.getUidForPackage(proxyAppPackage)?.let { effectiveExcluded = effectiveExcluded + it }
             }
 
-            val tableId = appState.nextTableId
             val rule = RouteRule(
                 id = UUID.randomUUID().toString().take(8),
                 fromInterface = fromInterface,
@@ -178,7 +198,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             val ok = routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
-
             if (ok) {
                 appState = appState.copy(
                     rules = appState.rules + rule,
