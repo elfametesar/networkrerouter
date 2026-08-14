@@ -34,11 +34,7 @@ class RoutingEngine {
         return (max downTo min).firstOrNull { it > 0 && it !in used }
     }
 
-    /**
-     * Find the earliest Android local-traffic policy rule which can consume
-     * packets after netd has assigned an fwmark. Our device-local catch-all
-     * must be before that rule, otherwise Android's rmnet/wlan policy wins.
-     */
+    /** Find the earliest Android local-traffic policy rule which can consume packets after netd marks them. */
     private suspend fun findLocalPolicyCeiling(): Int? = ipRuleLines()
         .mapNotNull { line ->
             val priority = line.substringBefore(":").trim().toIntOrNull() ?: return@mapNotNull null
@@ -47,15 +43,12 @@ class RoutingEngine {
         }
         .minOrNull()
 
-    /** Pick a free priority immediately before the first Android fwmark/iif-lo rule. */
+    /** Pick the highest free priority immediately before the first Android fwmark/iif-lo rule. */
     private suspend fun findLocalEgressPriority(): Int? {
         val ceiling = findLocalPolicyCeiling()
-        if (ceiling == null) {
-            // No fwmark/iif-lo policy was found. Fall back to a free policy slot
-            // below the first broad local rules, still entirely derived at runtime.
-            return findFreePriority(1, 19999)
-        }
-        return findFreePriority(ceiling - 1, 1)
+        if (ceiling == null) return findFreePriority(1, 19999)
+        if (ceiling <= 1) return null
+        return findFreePriority(1, ceiling - 1)
     }
 
     private suspend fun findIifLoTableRules(table: Int): List<Int> = ipRuleLines().mapNotNull { line ->
@@ -113,11 +106,7 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
-    /**
-     * Device-local traffic uses the same mechanism as the known-good manual
-     * setup, but chooses its policy priorities from the device's live ip-rule
-     * topology instead of hardcoding Android-specific numbers.
-     */
+    /** Device-local routing using the live Android policy-rule topology. */
     private suspend fun applyLocalEgressRule(rule: RouteRule, table: Int, realRoutingTable: String?): List<String>? {
         val localPriority = findLocalEgressPriority() ?: return null
         val commands = mutableListOf<String>()
@@ -138,7 +127,6 @@ class RoutingEngine {
         findIifLoTableRules(table).forEach { old ->
             commands.add("ip rule del priority $old 2>/dev/null || true")
         }
-
         commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
         commands.add("ip rule add iif lo lookup $table priority $localPriority")
         return commands
