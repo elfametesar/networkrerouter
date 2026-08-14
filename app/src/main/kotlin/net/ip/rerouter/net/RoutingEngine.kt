@@ -26,9 +26,6 @@ class RoutingEngine {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
-    /** Any interface carrying a current default route is an egress selector.
-     * Local sockets are born on lo, so the proven generic implementation is
-     * iif lo -> policy table -> selected tunnel. */
     private suspend fun hasDefaultRouteOnInterface(interfaceName: String): Boolean {
         val v4 = RootShell.exec(
             "ip route show default dev ${shellQuote(interfaceName)} 2>/dev/null"
@@ -98,8 +95,10 @@ class RoutingEngine {
 
     private suspend fun captureRpFilterState(hotspotInterface: String, tunnelInterface: String) {
         if (rpFilterStates.containsKey(tunnelInterface)) return
-        fun read(path: String): String? = RootShell.exec("cat $path 2>/dev/null").out
+
+        suspend fun read(path: String): String? = RootShell.exec("cat $path 2>/dev/null").out
             .firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
         rpFilterStates[tunnelInterface] = RpFilterState(
             all = read("/proc/sys/net/ipv4/conf/all/rp_filter"),
             hotspot = read("/proc/sys/net/ipv4/conf/$hotspotInterface/rp_filter"),
@@ -126,8 +125,6 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
-    /** Reproduces the user's known-working local-device routing script:
-     * default dev tunnel in a custom table + iif lo policy rule. */
     private suspend fun applyLocalEgressRule(
         rule: RouteRule,
         table: Int,
@@ -136,8 +133,6 @@ class RoutingEngine {
         val localPriority = findFreePriority(20001, 20999) ?: return null
         val commands = mutableListOf<String>()
 
-        /* UID exceptions are placed before the broad iif lo rule and continue
-         * through Android's existing real network table. */
         if (!realRoutingTable.isNullOrBlank()) {
             var offset = 1
             for (uid in rule.excludedUids) {
@@ -164,7 +159,6 @@ class RoutingEngine {
 
     suspend fun applyRule(rule: RouteRule, realRoutingTable: String? = null): Boolean {
         val table = rule.tableId
-        val mark = table
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
         val localEgress = hotspot == null &&
@@ -219,9 +213,9 @@ class RoutingEngine {
             for (uid in rule.excludedUids) {
                 commands.add("iptables -t mangle -A $chain -m owner --uid-owner $uid -j RETURN")
             }
-            commands.add("iptables -t mangle -A $chain -j MARK --set-mark $mark")
-            commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
-            commands.add("ip rule add fwmark $mark table $table priority $priority")
+            commands.add("iptables -t mangle -A $chain -j MARK --set-mark ${table}")
+            commands.add("ip rule del fwmark ${table} table $table 2>/dev/null || true")
+            commands.add("ip rule add fwmark ${table} table $table priority $priority")
             commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
             if (rule.useMasquerade) {
                 commands.add(
@@ -286,7 +280,9 @@ class RoutingEngine {
         ).isSuccess
 
     suspend fun removeProxyAppExemption(proxyUid: Int): Boolean =
-        RootShell.exec("ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true").isSuccess
+        RootShell.exec(
+            "ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true"
+        ).isSuccess
 
     suspend fun resetAll(
         rules: List<RouteRule>,
@@ -296,8 +292,7 @@ class RoutingEngine {
         val teardown = rules.map { removeRule(it, realRoutingTable) }
         val cleanupCommands = mutableListOf<String>()
         cleanupCommands.add(
-            "for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do " +
-                "iptables -t mangle -F \$c 2>/dev/null; iptables -t mangle -X \$c 2>/dev/null; done"
+            "for c in \\$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \\$c 2>/dev/null; iptables -t mangle -X \\$c 2>/dev/null; done"
         )
         for (name in createdInterfaces) {
             cleanupCommands.add("ip link delete ${shellQuote(name)} 2>/dev/null || true")
