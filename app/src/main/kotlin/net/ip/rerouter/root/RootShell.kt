@@ -16,6 +16,7 @@ object RootShell {
         val command: String,
         val exitCode: Int,
         val out: List<String>,
+        val err: List<String> = emptyList(),
         val isSuccess: Boolean
     )
 
@@ -38,6 +39,7 @@ object RootShell {
                 command = command,
                 exitCode = result.code,
                 out = result.out,
+                err = result.err,
                 isSuccess = result.isSuccess
             )
         }
@@ -61,6 +63,7 @@ object RootShell {
                     command = commands.joinToString(" && "),
                     exitCode = result.code,
                     out = result.out,
+                    err = result.err,
                     isSuccess = result.isSuccess
                 )
             )

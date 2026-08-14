@@ -79,6 +79,13 @@ fun CreateRuleDialog(
                     Text("From", style = AppType.sectionLabel)
                     Spacer(Modifier.height(6.dp))
                     InterfacePicker(interfaces, from, fromMenuOpen, { fromMenuOpen = it }) { from = it; fromMenuOpen = false }
+                    if (!includeHotspot) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Ignored unless \"Route hotspot clients too\" is on — device-local traffic is matched by iif lo, not by this interface.",
+                            style = AppType.dataSecondary
+                        )
+                    }
                 }
                 item { Spacer(Modifier.height(14.dp)) }
                 item {

@@ -203,8 +203,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sourceType = sourceType
             )
 
-            val ok = routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
-            if (ok) {
+            val result = routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
+            if (result.isSuccess) {
                 appState = appState.copy(
                     rules = appState.rules + rule,
                     nextTableId = if (tableId >= 252) 100 else tableId + 1
@@ -212,11 +212,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 stateStore.save(appState)
                 _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
             } else {
-                val diagnostics = RootShell.exec("ip rule; echo ---; ip route show table $tableId").out
-                    .takeLast(12).joinToString(" | ")
+                val reason = result.stderr?.takeIf { it.isNotBlank() } ?: "no error output captured"
+                val failedCmd = result.failedCommand?.let { " Command: $it." } ?: ""
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    errorMessage = "Failed to apply $fromInterface → $toInterface (table $tableId). $diagnostics"
+                    errorMessage = "Failed to apply $fromInterface → $toInterface (table $tableId).$failedCmd Error: $reason"
                 )
             }
         }
@@ -241,7 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rule = appState.rules.firstOrNull { it.id == ruleId } ?: return@launch
             _uiState.value = _uiState.value.copy(isLoading = true)
-            val ok = if (enabled) routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
+            val ok = if (enabled) routingEngine.applyRule(rule, _uiState.value.realRoutingTable).isSuccess
             else routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
             if (!ok) {
                 _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "Failed to ${if (enabled) "enable" else "disable"} route")

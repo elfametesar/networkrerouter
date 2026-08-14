@@ -4,6 +4,13 @@ import net.ip.rerouter.model.RouteRule
 import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.root.RootShell
 
+/** Result of applying a rule: whether it succeeded, and if not, which command failed and why. */
+data class RuleApplyResult(
+    val isSuccess: Boolean,
+    val failedCommand: String? = null,
+    val stderr: String? = null
+)
+
 class RoutingEngine {
     private val chainPrefix = "IPRR"
 
@@ -151,7 +158,7 @@ class RoutingEngine {
         return commands
     }
 
-    suspend fun applyRule(rule: RouteRule, realRoutingTable: String? = null): Boolean {
+    suspend fun applyRule(rule: RouteRule, realRoutingTable: String? = null): RuleApplyResult {
         val table = rule.tableId
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
@@ -191,10 +198,12 @@ class RoutingEngine {
             }
             commands.add("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward")
         } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
-            val localCommands = applyLocalEgressRule(rule, table, realRoutingTable) ?: return false
+            val localCommands = applyLocalEgressRule(rule, table, realRoutingTable)
+                ?: return RuleApplyResult(false, failedCommand = null, stderr = "No free priority in range 20001-19999 for local egress rule, or excluded UID priority underflowed")
             commands.addAll(localCommands)
         } else {
-            val priority = findFreePriority(1200, 19999) ?: return false
+            val priority = findFreePriority(1200, 19999)
+                ?: return RuleApplyResult(false, failedCommand = null, stderr = "No free ip rule priority in range 1200-19999")
             commands.add("iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain")
             commands.add(
                 "iptables -t mangle -C PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || " +
@@ -217,7 +226,16 @@ class RoutingEngine {
         }
 
         val results = RootShell.execSequential(commands)
-        return results.isNotEmpty() && results.all { it.isSuccess }
+        if (results.isEmpty() || !results.all { it.isSuccess }) {
+            val failed = results.lastOrNull { !it.isSuccess }
+            return RuleApplyResult(
+                isSuccess = false,
+                failedCommand = failed?.command,
+                stderr = failed?.err?.joinToString("\n")?.takeIf { it.isNotBlank() }
+                    ?: failed?.out?.joinToString("\n")
+            )
+        }
+        return RuleApplyResult(isSuccess = true)
     }
 
     suspend fun removeRule(rule: RouteRule, realRoutingTable: String? = null): Boolean {
