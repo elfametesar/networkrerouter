@@ -1,11 +1,18 @@
 package net.ip.rerouter.net
 
 import net.ip.rerouter.model.RouteRule
-import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.root.RootShell
 
 class RoutingEngine {
     private val chainPrefix = "IPRR"
+
+    private data class RpFilterState(
+        val all: String?,
+        val hotspot: String?,
+        val tunnel: String?
+    )
+
+    private val rpFilterStates = mutableMapOf<String, RpFilterState>()
 
     private fun isHotspotInterface(name: String): Boolean = when {
         name == "wlan0" -> false
@@ -49,40 +56,72 @@ class RoutingEngine {
         }
     }
 
-    /**
-     * Hotspot mode is ingress-oriented.
-     *
-     * If the user selected wlan1 -> tun1, use wlan1 as ingress and tun1 as
-     * tunnel as-is.
-     *
-     * If the user selected tun1 -> wlan1 (which is a natural choice when
-     * thinking in terms of packet exit direction), automatically invert the
-     * policy for hotspot clients: wlan1 -> tun1.
-     */
-    private fun hotspotEndpoints(rule: RouteRule): Pair<String, String>? {
-        if (rule.sourceType != SourceInterfaceType.LOCAL_AND_HOTSPOT) return null
+    private fun hotspotEndpoints(rule: net.ip.rerouter.model.RouteRule): Pair<String, String>? {
+        if (!isHotspotInterface(rule.fromInterface) && !isHotspotInterface(rule.toInterface)) {
+            return null
+        }
 
         return when {
-            isHotspotInterface(rule.fromInterface) ->
-                rule.fromInterface to rule.toInterface
-
-            isHotspotInterface(rule.toInterface) ->
-                rule.toInterface to rule.fromInterface
-
+            isHotspotInterface(rule.fromInterface) -> rule.fromInterface to rule.toInterface
+            isHotspotInterface(rule.toInterface) -> rule.toInterface to rule.fromInterface
             else -> null
         }
     }
 
-    suspend fun applyRule(rule: RouteRule): Boolean {
+    private suspend fun captureRpFilterState(
+        hotspotInterface: String,
+        tunnelInterface: String
+    ) {
+        if (rpFilterStates.containsKey(tunnelInterface)) return
+
+        fun read(path: String): String? {
+            val result = kotlinx.coroutines.runBlocking { RootShell.exec("cat $path 2>/dev/null") }
+            return result.out.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        }
+
+        rpFilterStates[tunnelInterface] = RpFilterState(
+            all = read("/proc/sys/net/ipv4/conf/all/rp_filter"),
+            hotspot = read("/proc/sys/net/ipv4/conf/$hotspotInterface/rp_filter"),
+            tunnel = read("/proc/sys/net/ipv4/conf/$tunnelInterface/rp_filter")
+        )
+    }
+
+    private suspend fun disableRpFilter(
+        hotspotInterface: String,
+        tunnelInterface: String
+    ) {
+        val commands = listOf(
+            "echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter",
+            "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(hotspotInterface)}/rp_filter",
+            "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(tunnelInterface)}/rp_filter"
+        )
+        RootShell.execSequential(commands)
+    }
+
+    private suspend fun restoreRpFilter(
+        hotspotInterface: String,
+        tunnelInterface: String
+    ) {
+        val state = rpFilterStates.remove(tunnelInterface) ?: return
+        val commands = mutableListOf<String>()
+        state.all?.let { commands.add("echo $it > /proc/sys/net/ipv4/conf/all/rp_filter") }
+        state.hotspot?.let { commands.add("echo $it > /proc/sys/net/ipv4/conf/${shellQuote(hotspotInterface)}/rp_filter") }
+        state.tunnel?.let { commands.add("echo $it > /proc/sys/net/ipv4/conf/${shellQuote(tunnelInterface)}/rp_filter") }
+        if (commands.isNotEmpty()) RootShell.execSequential(commands)
+    }
+
+    suspend fun applyRule(rule: net.ip.rerouter.model.RouteRule): Boolean {
         val table = rule.tableId
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
         val hotspot = hotspotEndpoints(rule)
-        val hotspotRule = hotspot != null
         val commands = mutableListOf<String>()
 
-        if (hotspotRule) {
-            val (hotspotInterface, tunnelInterface) = hotspot!!
+        if (hotspot != null) {
+            val (hotspotInterface, tunnelInterface) = hotspot
+
+            captureRpFilterState(hotspotInterface, tunnelInterface)
+            disableRpFilter(hotspotInterface, tunnelInterface)
 
             findExistingHotspotRulePriorities(hotspotInterface, table)
                 .forEach { priority ->
@@ -107,6 +146,15 @@ class RoutingEngine {
             commands.add(
                 "iptables -C tetherctrl_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT 2>/dev/null || " +
                     "iptables -I tetherctrl_FORWARD 1 -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT"
+            )
+
+            commands.add(
+                "iptables -t mangle -C tetherctrl_mangle_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || " +
+                    "iptables -t mangle -I tetherctrl_mangle_FORWARD 1 -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+            )
+            commands.add(
+                "iptables -t mangle -C tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || " +
+                    "iptables -t mangle -I tetherctrl_mangle_FORWARD 1 -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
             )
 
             if (rule.useMasquerade) {
@@ -150,7 +198,7 @@ class RoutingEngine {
         return results.isNotEmpty() && results.all { it.isSuccess }
     }
 
-    suspend fun removeRule(rule: RouteRule): Boolean {
+    suspend fun removeRule(rule: net.ip.rerouter.model.RouteRule): Boolean {
         val table = rule.tableId
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
@@ -172,8 +220,15 @@ class RoutingEngine {
                 "iptables -D tetherctrl_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT 2>/dev/null || true"
             )
             commands.add(
+                "iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"
+            )
+            commands.add(
+                "iptables -t mangle -D tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true"
+            )
+            commands.add(
                 "iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || true"
             )
+            restoreRpFilter(hotspotInterface, tunnelInterface)
         } else {
             commands.add(
                 "iptables -t mangle -D PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || true"
@@ -208,7 +263,7 @@ class RoutingEngine {
     }
 
     suspend fun resetAll(
-        rules: List<RouteRule>,
+        rules: List<net.ip.rerouter.model.RouteRule>,
         createdInterfaces: List<String>
     ): Boolean {
         val teardown = rules.map { removeRule(it) }
