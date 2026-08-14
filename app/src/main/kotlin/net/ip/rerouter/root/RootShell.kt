@@ -5,21 +5,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Thin wrapper around libsu's root shell. All privileged command execution in
- * the app goes through here so there's one place that owns the root session,
- * one place that logs what was run, and one place to swap implementations if
- * we ever need to (e.g. Magisk vs KernelSU differences).
+ * Thin wrapper around libsu's root shell.
+ *
+ * libsu configuration is initialized by RerouterApp before any shell is
+ * created. This object only owns command execution and root-state checks.
  */
 object RootShell {
-
-    init {
-        Shell.enableVerboseLogging = false
-        Shell.setDefaultBuilder(
-            Shell.Builder.create()
-                .setFlags(Shell.FLAG_REDIRECT_STDERR)
-                .setTimeout(15)
-        )
-    }
 
     data class CommandResult(
         val command: String,
@@ -28,46 +19,70 @@ object RootShell {
         val isSuccess: Boolean
     )
 
-    /** Confirms root is actually available and granted, not just that `su` exists. */
+    /**
+     * Confirms root is actually available and granted,
+     * not just that `su` exists.
+     */
     suspend fun isRootAvailable(): Boolean = withContext(Dispatchers.IO) {
         Shell.getShell().isRoot
     }
 
-    /** Runs a single command as root and returns structured output. */
-    suspend fun exec(command: String): CommandResult = withContext(Dispatchers.IO) {
-        val result = Shell.cmd(command).exec()
-        CommandResult(
-            command = command,
-            exitCode = result.code,
-            out = result.out,
-            isSuccess = result.isSuccess
-        )
-    }
+    /**
+     * Runs a single command as root and returns structured output.
+     */
+    suspend fun exec(command: String): CommandResult =
+        withContext(Dispatchers.IO) {
+            val result = Shell.cmd(command).exec()
 
-    /** Runs several commands as one batched root session (fewer su round-trips). */
-    suspend fun execBatch(commands: List<String>): List<CommandResult> = withContext(Dispatchers.IO) {
-        if (commands.isEmpty()) return@withContext emptyList()
-        val result = Shell.cmd(*commands.toTypedArray()).exec()
-        // libsu gives us combined output for a batch; if per-command results are
-        // needed the caller should prefer sequential exec() calls instead.
-        listOf(
             CommandResult(
-                command = commands.joinToString(" && "),
+                command = command,
                 exitCode = result.code,
                 out = result.out,
                 isSuccess = result.isSuccess
             )
-        )
-    }
-
-    /** Runs commands sequentially, stopping at the first failure. Returns all results so far. */
-    suspend fun execSequential(commands: List<String>): List<CommandResult> = withContext(Dispatchers.IO) {
-        val results = mutableListOf<CommandResult>()
-        for (cmd in commands) {
-            val r = exec(cmd)
-            results.add(r)
-            if (!r.isSuccess) break
         }
-        results
-    }
+
+    /**
+     * Runs several commands as one batched root session.
+     *
+     * libsu gives us combined output for a batch. If per-command results
+     * are needed, the caller should prefer sequential exec() calls.
+     */
+    suspend fun execBatch(commands: List<String>): List<CommandResult> =
+        withContext(Dispatchers.IO) {
+            if (commands.isEmpty()) {
+                return@withContext emptyList()
+            }
+
+            val result = Shell.cmd(*commands.toTypedArray()).exec()
+
+            listOf(
+                CommandResult(
+                    command = commands.joinToString(" && "),
+                    exitCode = result.code,
+                    out = result.out,
+                    isSuccess = result.isSuccess
+                )
+            )
+        }
+
+    /**
+     * Runs commands sequentially, stopping at the first failure.
+     * Returns all results collected so far.
+     */
+    suspend fun execSequential(commands: List<String>): List<CommandResult> =
+        withContext(Dispatchers.IO) {
+            val results = mutableListOf<CommandResult>()
+
+            for (cmd in commands) {
+                val result = exec(cmd)
+                results.add(result)
+
+                if (!result.isSuccess) {
+                    break
+                }
+            }
+
+            results
+        }
 }
