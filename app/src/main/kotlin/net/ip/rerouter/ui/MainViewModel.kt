@@ -54,8 +54,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             appState = stateStore.load()
             _uiState.value = _uiState.value.copy(rules = appState.rules)
-            val realTable = interfaceRepo.detectRealRoutingTable()
-            _uiState.value = _uiState.value.copy(realRoutingTable = realTable)
+            refreshRealRoutingTable()
             refreshInterfaces(showLoading = true)
             loadApps()
 
@@ -63,9 +62,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 while (isActive) {
                     delay(INTERFACE_REFRESH_MS)
                     refreshInterfaces(showLoading = false)
+                    refreshRealRoutingTable()
                 }
             }
         }
+    }
+
+    private suspend fun refreshRealRoutingTable() {
+        val realTable = interfaceRepo.detectRealRoutingTable()
+        _uiState.value = _uiState.value.copy(realRoutingTable = realTable)
     }
 
     fun refreshInterfaces(showLoading: Boolean = false) {
@@ -89,10 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Pick a table ID that is not already assigned in Android's named table
-     * registry, not present in policy rules, and not used by one of our rules.
-     */
+    /** Pick a table ID not already assigned in Android's named table registry, policy rules, or app rules. */
     private suspend fun allocateRoutingTable(): Int? {
         val usedByRules = appState.rules.map { it.tableId }.toSet()
 
@@ -148,6 +150,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.value = _uiState.value.copy(errorMessage = "Failed to remove interface $name")
             }
             refreshInterfaces(false)
+            refreshRealRoutingTable()
             _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
         }
     }
@@ -157,6 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ok = interfaceRepo.setInterfaceState(name, up)
             if (!ok) _uiState.value = _uiState.value.copy(errorMessage = "Failed to set $name ${if (up) "up" else "down"}")
             refreshInterfaces(false)
+            refreshRealRoutingTable()
         }
     }
 
@@ -181,6 +185,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            // The real network table is dynamic on Android and can change after boot,
+            // SIM/network changes, or hotspot transitions. Never rely on the value read only at startup.
+            val liveRealTable = interfaceRepo.detectRealRoutingTable()
+            _uiState.value = _uiState.value.copy(realRoutingTable = liveRealTable)
+
             val tableId = allocateRoutingTable()
             if (tableId == null) {
                 _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "No free routing table ID is available")
@@ -203,7 +212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sourceType = sourceType
             )
 
-            val result = routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
+            val result = routingEngine.applyRule(rule, liveRealTable)
             if (result.isSuccess) {
                 appState = appState.copy(
                     rules = appState.rules + rule,
@@ -241,8 +250,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rule = appState.rules.firstOrNull { it.id == ruleId } ?: return@launch
             _uiState.value = _uiState.value.copy(isLoading = true)
-            val ok = if (enabled) routingEngine.applyRule(rule, _uiState.value.realRoutingTable).isSuccess
-            else routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
+            val liveRealTable = interfaceRepo.detectRealRoutingTable()
+            _uiState.value = _uiState.value.copy(realRoutingTable = liveRealTable)
+            val ok = if (enabled) routingEngine.applyRule(rule, liveRealTable).isSuccess
+            else routingEngine.removeRule(rule, liveRealTable)
             if (!ok) {
                 _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "Failed to ${if (enabled) "enable" else "disable"} route")
                 return@launch
@@ -261,6 +272,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appState = AppState()
             stateStore.save(appState)
             refreshInterfaces(false)
+            refreshRealRoutingTable()
             _uiState.value = _uiState.value.copy(rules = emptyList(), isLoading = false)
         }
     }
