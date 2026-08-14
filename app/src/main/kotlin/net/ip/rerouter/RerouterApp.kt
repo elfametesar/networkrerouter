@@ -4,10 +4,21 @@ import android.app.Application
 import com.topjohnwu.superuser.Shell
 
 class RerouterApp : Application() {
+
     override fun onCreate() {
         super.onCreate()
-        // Pre-warm the root shell in the background so the first user action
-        // isn't the one eating the su prompt latency.
+
+        // libsu main shell oluşturulmadan ÖNCE default builder'ı ayarla.
+        // Shell.getShell() bundan sonra çağrılmalı.
+        Shell.enableVerboseLogging = false
+        Shell.setDefaultBuilder(
+            Shell.Builder.create()
+                .setFlags(Shell.FLAG_REDIRECT_STDERR)
+                .setTimeout(15)
+        )
+
+        // Root shell'i önceden oluştur.
+        // Artık doğru builder kullanılarak oluşturulacak.
         Shell.getShell {}
     }
 }
