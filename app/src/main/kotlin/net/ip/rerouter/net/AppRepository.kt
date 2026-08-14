@@ -28,4 +28,19 @@ class AppRepository(private val context: Context) {
                 .sortedBy { it.label.lowercase() }
                 .toList()
         }
+
+    /**
+     * Looks up the UID for a given package name.
+     * Returns null if the package is not installed.
+     */
+    suspend fun getUidForPackage(packageName: String): Int? =
+        withContext(Dispatchers.Default) {
+            try {
+                val pm = context.packageManager
+                val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                apps.firstOrNull { it.packageName == packageName }?.uid
+            } catch (e: Exception) {
+                null
+            }
+        }
 }

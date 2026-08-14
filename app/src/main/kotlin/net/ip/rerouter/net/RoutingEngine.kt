@@ -1,6 +1,7 @@
 package net.ip.rerouter.net
 
 import net.ip.rerouter.model.RouteRule
+import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.root.RootShell
 
 /**
@@ -11,6 +12,10 @@ import net.ip.rerouter.root.RootShell
  * App exclusion is implemented with iptables' `owner` match on UID: excluded
  * apps get a rule that skips the MASQUERADE/mark-based routing before the
  * general rule would otherwise catch them.
+ *
+ * Proxy app exemption uses uid-based ip rules to bypass the custom routing
+ * entirely, preventing deadlock when the proxy app's own traffic would be
+ * routed into its own tunnel.
  */
 class RoutingEngine {
 
@@ -53,12 +58,9 @@ class RoutingEngine {
         // (tetherctrl_FORWARD / tetherctrl_nat_POSTROUTING) that gate and NAT
         // traffic to/from hotspot clients (e.g. wlan1). Those chains end in an
         // unconditional DROP and are consulted independently of PREROUTING/
-        // POSTROUTING above, so a rule routing hotspot traffic to another
-        // interface is silently dropped — and never NATed — unless we also
-        // insert matching ACCEPT/MASQUERADE rules there. This is why hotspot
-        // clients previously kept the original IP: their traffic never
-        // actually reached toInterface at all.
-        if (isHotspotInterface(rule.fromInterface)) {
+        // POSTROUTING above. If we're routing hotspot traffic, we must insert
+        // matching ACCEPT/MASQUERADE rules in tetherctrl_* chains.
+        if (rule.sourceType == SourceInterfaceType.LOCAL_AND_HOTSPOT && isHotspotInterface(rule.fromInterface)) {
             commands.add(
                 "iptables -I tetherctrl_FORWARD -i ${rule.fromInterface} -o ${rule.toInterface} -j ACCEPT 2>/dev/null || true"
             )
@@ -93,7 +95,7 @@ class RoutingEngine {
             "iptables -t nat -D POSTROUTING -o ${rule.toInterface} -j MASQUERADE 2>/dev/null || true"
         )
 
-        if (isHotspotInterface(rule.fromInterface)) {
+        if (rule.sourceType == SourceInterfaceType.LOCAL_AND_HOTSPOT && isHotspotInterface(rule.fromInterface)) {
             commands.add(
                 "iptables -D tetherctrl_FORWARD -i ${rule.fromInterface} -o ${rule.toInterface} -j ACCEPT 2>/dev/null || true"
             )
@@ -107,6 +109,29 @@ class RoutingEngine {
 
         val results = RootShell.execSequential(commands)
         return results.all { it.isSuccess }
+    }
+
+    /**
+     * Exempts a proxy app (by UID) from routing by adding a rule that sends its
+     * traffic directly to the real routing table, bypassing custom routes.
+     * This prevents the proxy app's own upstream traffic from being routed into
+     * its own tunnel, which would cause deadlock.
+     */
+    suspend fun exemptProxyApp(proxyUid: Int, realTable: String, priority: Int = 20400): Boolean {
+        val result = RootShell.exec(
+            "ip rule add uidrange $proxyUid-$proxyUid lookup $realTable priority $priority 2>/dev/null || true"
+        )
+        return result.isSuccess
+    }
+
+    /**
+     * Removes the proxy app exemption rule.
+     */
+    suspend fun removeProxyAppExemption(proxyUid: Int): Boolean {
+        val result = RootShell.exec(
+            "ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true"
+        )
+        return result.isSuccess
     }
 
     /**

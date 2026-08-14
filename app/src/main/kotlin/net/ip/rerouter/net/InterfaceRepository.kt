@@ -151,8 +151,7 @@ class InterfaceRepository {
      * Creates a new tun interface owned by the app, optionally assigning an
      * IPv4 address (CIDR form, e.g. "10.0.85.1/24") once the device exists.
      * Address assignment must happen after `ip tuntap add`, since the
-     * interface doesn't exist yet beforehand — previously no IP was ever
-     * assigned, leaving app-created interfaces addressless.
+     * interface doesn't exist yet beforehand.
      */
     suspend fun createTunInterface(name: String, ipCidr: String? = null): Boolean {
         val createResult = RootShell.exec("ip tuntap add dev $name mode tun")
@@ -197,5 +196,25 @@ class InterfaceRepository {
         val state = if (up) "up" else "down"
         val result = RootShell.exec("ip link set $name $state")
         return result.isSuccess
+    }
+
+    /**
+     * Detects whether an interface is a hotspot/tethering interface.
+     * Android exposes hotspot clients as wlan-prefixed names distinct from
+     * the station wifi interface (commonly wlan0).
+     */
+    fun isHotspotInterface(name: String): Boolean =
+        name.startsWith("wlan") && name != "wlan0"
+
+    /**
+     * Tries to detect the real routing table used by the device's cellular/primary connection.
+     * Common names: rmnet_data0, rmnet_data2, ccmni0, radio0. Used for proxy app exemption.
+     * Returns the first cellular interface found, or null if none found.
+     */
+    suspend fun detectRealRoutingTable(): String? {
+        val interfaces = listInterfaces(emptySet())
+        return interfaces.firstOrNull {
+            it.kind == InterfaceKind.CELLULAR && it.isUp
+        }?.name
     }
 }
