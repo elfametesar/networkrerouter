@@ -33,12 +33,17 @@ import net.ip.rerouter.ui.theme.TextSecondary
 @Composable
 fun CreateInterfaceDialog(
     onDismiss: () -> Unit,
-    onConfirm: (name: String, isDummy: Boolean) -> Unit
+    onConfirm: (name: String, isDummy: Boolean, ipCidr: String?) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var isDummy by remember { mutableStateOf(false) }
+    var ipCidr by remember { mutableStateOf("") }
 
     val nameValid = name.matches(Regex("^[a-zA-Z][a-zA-Z0-9]{0,14}$"))
+    // CIDR is optional, but if the user typed something it must be a valid
+    // "a.b.c.d/prefix" so we don't hand a malformed string to `ip addr add`.
+    val ipCidrRegex = Regex("^(\\d{1,3}\\.){3}\\d{1,3}/\\d{1,2}$")
+    val ipCidrValid = ipCidr.isBlank() || ipCidr.matches(ipCidrRegex)
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -119,6 +124,46 @@ fun CreateInterfaceDialog(
                 style = AppType.bodySecondary
             )
 
+            Spacer(Modifier.height(14.dp))
+            Text("IPv4 address (optional)", style = AppType.sectionLabel)
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = ipCidr,
+                onValueChange = { value -> ipCidr = value.filter { it.isDigit() || it == '.' || it == '/' } },
+                label = { Text("Address", color = TextSecondary) },
+                placeholder = { Text("10.0.85.1/24", color = TextSecondary) },
+                isError = ipCidr.isNotEmpty() && !ipCidrValid,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = TextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedContainerColor = BgSurfaceRaised,
+                    unfocusedContainerColor = BgSurfaceRaised,
+                    focusedIndicatorColor = AccentSignal,
+                    unfocusedIndicatorColor = TextSecondary,
+                    cursorColor = AccentSignal,
+                    focusedLabelColor = AccentSignal,
+                    unfocusedLabelColor = TextSecondary
+                )
+            )
+
+            if (ipCidr.isNotEmpty() && !ipCidrValid) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Use CIDR form, e.g. 10.0.85.1/24. Leave blank to skip.",
+                    style = AppType.dataSecondary
+                )
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Without an address the interface comes up link-only — most " +
+                    "routing/proxy setups (e.g. tun2socks) need this set.",
+                style = AppType.bodySecondary
+            )
+
             Spacer(Modifier.height(20.dp))
 
             Row(
@@ -132,8 +177,8 @@ fun CreateInterfaceDialog(
                 Spacer(Modifier.width(8.dp))
 
                 OutlinedButton(
-                    enabled = nameValid,
-                    onClick = { onConfirm(name, isDummy) }
+                    enabled = nameValid && ipCidrValid,
+                    onClick = { onConfirm(name, isDummy, ipCidr.ifBlank { null }) }
                 ) {
                     Text("Create")
                 }

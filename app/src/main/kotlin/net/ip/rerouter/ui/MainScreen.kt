@@ -183,8 +183,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     if (showCreateInterface) {
         CreateInterfaceDialog(
             onDismiss = { showCreateInterface = false },
-            onConfirm = { name, isDummy ->
-                viewModel.createInterface(name, isDummy)
+            onConfirm = { name, isDummy, ipCidr ->
+                viewModel.createInterface(name, isDummy, ipCidr)
                 showCreateInterface = false
             }
         )

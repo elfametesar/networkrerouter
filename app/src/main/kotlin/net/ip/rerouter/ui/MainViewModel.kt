@@ -99,13 +99,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createInterface(name: String, isDummy: Boolean) {
+    fun createInterface(name: String, isDummy: Boolean, ipCidr: String? = null) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             val ok = if (isDummy) {
-                interfaceRepo.createDummyInterface(name)
+                interfaceRepo.createDummyInterface(name, ipCidr)
             } else {
-                interfaceRepo.createTunInterface(name)
+                interfaceRepo.createTunInterface(name, ipCidr)
             }
 
             if (ok) {

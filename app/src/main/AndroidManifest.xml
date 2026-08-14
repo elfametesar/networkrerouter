@@ -10,6 +10,16 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
 
+    <!--
+        Without this, PackageManager#getInstalledApplications is subject to
+        package-visibility filtering on API 30+ and silently returns only a
+        small subset of installed apps (this app itself plus anything covered
+        by a <queries> declaration) instead of the full list — this was why
+        the exclusion picker only ever showed a handful of apps.
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
     <application
         android:name=".RerouterApp"
         android:allowBackup="false"

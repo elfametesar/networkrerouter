@@ -147,15 +147,43 @@ class InterfaceRepository {
         return interfaces
     }
 
-    /** Creates a new tun interface owned by the app. Returns true on success. */
-    suspend fun createTunInterface(name: String): Boolean {
-        val result = RootShell.exec("ip tuntap add dev $name mode tun && ip link set $name up")
-        return result.isSuccess
+    /**
+     * Creates a new tun interface owned by the app, optionally assigning an
+     * IPv4 address (CIDR form, e.g. "10.0.85.1/24") once the device exists.
+     * Address assignment must happen after `ip tuntap add`, since the
+     * interface doesn't exist yet beforehand — previously no IP was ever
+     * assigned, leaving app-created interfaces addressless.
+     */
+    suspend fun createTunInterface(name: String, ipCidr: String? = null): Boolean {
+        val createResult = RootShell.exec("ip tuntap add dev $name mode tun")
+        if (!createResult.isSuccess) return false
+
+        if (!ipCidr.isNullOrBlank()) {
+            val addrResult = RootShell.exec("ip addr add $ipCidr dev $name")
+            if (!addrResult.isSuccess) return false
+        }
+
+        val upResult = RootShell.exec("ip link set $name up")
+        return upResult.isSuccess
     }
 
     /** Creates a dummy interface (useful as a routing endpoint/black-hole target). */
-    suspend fun createDummyInterface(name: String): Boolean {
-        val result = RootShell.exec("ip link add $name type dummy && ip link set $name up")
+    suspend fun createDummyInterface(name: String, ipCidr: String? = null): Boolean {
+        val createResult = RootShell.exec("ip link add $name type dummy")
+        if (!createResult.isSuccess) return false
+
+        if (!ipCidr.isNullOrBlank()) {
+            val addrResult = RootShell.exec("ip addr add $ipCidr dev $name")
+            if (!addrResult.isSuccess) return false
+        }
+
+        val upResult = RootShell.exec("ip link set $name up")
+        return upResult.isSuccess
+    }
+
+    /** Assigns (or reassigns) an IPv4 address on an existing interface. */
+    suspend fun setInterfaceAddress(name: String, ipCidr: String): Boolean {
+        val result = RootShell.exec("ip addr replace $ipCidr dev $name")
         return result.isSuccess
     }
 

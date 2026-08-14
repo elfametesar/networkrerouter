@@ -49,6 +49,29 @@ class RoutingEngine {
             )
         }
 
+        // Android's own tethering control owns a separate set of chains
+        // (tetherctrl_FORWARD / tetherctrl_nat_POSTROUTING) that gate and NAT
+        // traffic to/from hotspot clients (e.g. wlan1). Those chains end in an
+        // unconditional DROP and are consulted independently of PREROUTING/
+        // POSTROUTING above, so a rule routing hotspot traffic to another
+        // interface is silently dropped — and never NATed — unless we also
+        // insert matching ACCEPT/MASQUERADE rules there. This is why hotspot
+        // clients previously kept the original IP: their traffic never
+        // actually reached toInterface at all.
+        if (isHotspotInterface(rule.fromInterface)) {
+            commands.add(
+                "iptables -I tetherctrl_FORWARD -i ${rule.fromInterface} -o ${rule.toInterface} -j ACCEPT 2>/dev/null || true"
+            )
+            commands.add(
+                "iptables -I tetherctrl_FORWARD -i ${rule.toInterface} -o ${rule.fromInterface} -j ACCEPT 2>/dev/null || true"
+            )
+            if (rule.useMasquerade) {
+                commands.add(
+                    "iptables -t nat -I tetherctrl_nat_POSTROUTING -o ${rule.toInterface} -j MASQUERADE 2>/dev/null || true"
+                )
+            }
+        }
+
         commands.add("echo 1 > /proc/sys/net/ipv4/ip_forward")
 
         val results = RootShell.execSequential(commands)
@@ -61,7 +84,7 @@ class RoutingEngine {
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
 
-        val commands = listOf(
+        val commands = mutableListOf(
             "iptables -t mangle -D PREROUTING -i ${rule.fromInterface} -j $chain 2>/dev/null || true",
             "iptables -t mangle -F $chain 2>/dev/null || true",
             "iptables -t mangle -X $chain 2>/dev/null || true",
@@ -70,9 +93,34 @@ class RoutingEngine {
             "iptables -t nat -D POSTROUTING -o ${rule.toInterface} -j MASQUERADE 2>/dev/null || true"
         )
 
+        if (isHotspotInterface(rule.fromInterface)) {
+            commands.add(
+                "iptables -D tetherctrl_FORWARD -i ${rule.fromInterface} -o ${rule.toInterface} -j ACCEPT 2>/dev/null || true"
+            )
+            commands.add(
+                "iptables -D tetherctrl_FORWARD -i ${rule.toInterface} -o ${rule.fromInterface} -j ACCEPT 2>/dev/null || true"
+            )
+            commands.add(
+                "iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${rule.toInterface} -j MASQUERADE 2>/dev/null || true"
+            )
+        }
+
         val results = RootShell.execSequential(commands)
         return results.all { it.isSuccess }
     }
+
+    /**
+     * Android exposes hotspot/tethering client interfaces as wlan-prefixed
+     * names distinct from the station wifi interface (commonly wlan1, but
+     * this varies by OEM). We treat anything wlan-prefixed except the
+     * primary wlan0 as a tethering interface for the purpose of also
+     * touching the tetherctrl_* chains; this errs toward applying the extra
+     * rules rather than missing a device where the hotspot uses a name we
+     * didn't anticipate, since the rules are harmless no-ops when the
+     * chains don't exist or aren't matched.
+     */
+    private fun isHotspotInterface(name: String): Boolean =
+        name.startsWith("wlan") && name != "wlan0"
 
     /**
      * Full reset: removes every rule this app has ever created (by chain
