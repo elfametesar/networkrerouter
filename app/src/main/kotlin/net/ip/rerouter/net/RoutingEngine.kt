@@ -22,6 +22,18 @@ class RoutingEngine {
         else -> false
     }
 
+    /**
+     * A cellular interface is an egress/WAN interface, not an ingress source
+     * for locally-generated traffic. For rules such as rmnet_data3 -> tun1,
+     * the phone's own sockets must therefore be marked in OUTPUT.
+     */
+    private fun isCellularInterface(name: String): Boolean = when {
+        name.startsWith("rmnet") -> true
+        name.startsWith("ccmni") -> true
+        name.startsWith("radio") -> true
+        else -> false
+    }
+
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
@@ -56,7 +68,7 @@ class RoutingEngine {
         }
     }
 
-    private fun hotspotEndpoints(rule: net.ip.rerouter.model.RouteRule): Pair<String, String>? {
+    private fun hotspotEndpoints(rule: RouteRule): Pair<String, String>? {
         if (!isHotspotInterface(rule.fromInterface) && !isHotspotInterface(rule.toInterface)) {
             return null
         }
@@ -74,28 +86,27 @@ class RoutingEngine {
     ) {
         if (rpFilterStates.containsKey(tunnelInterface)) return
 
-        fun read(path: String): String? {
-            val result = kotlinx.coroutines.runBlocking { RootShell.exec("cat $path 2>/dev/null") }
-            return result.out.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-        }
+        val all = RootShell.exec("cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null").out
+            .firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        val hotspot = RootShell.exec("cat /proc/sys/net/ipv4/conf/$hotspotInterface/rp_filter 2>/dev/null").out
+            .firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        val tunnel = RootShell.exec("cat /proc/sys/net/ipv4/conf/$tunnelInterface/rp_filter 2>/dev/null").out
+            .firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
 
-        rpFilterStates[tunnelInterface] = RpFilterState(
-            all = read("/proc/sys/net/ipv4/conf/all/rp_filter"),
-            hotspot = read("/proc/sys/net/ipv4/conf/$hotspotInterface/rp_filter"),
-            tunnel = read("/proc/sys/net/ipv4/conf/$tunnelInterface/rp_filter")
-        )
+        rpFilterStates[tunnelInterface] = RpFilterState(all, hotspot, tunnel)
     }
 
     private suspend fun disableRpFilter(
         hotspotInterface: String,
         tunnelInterface: String
     ) {
-        val commands = listOf(
-            "echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter",
-            "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(hotspotInterface)}/rp_filter",
-            "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(tunnelInterface)}/rp_filter"
+        RootShell.execSequential(
+            listOf(
+                "echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter",
+                "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(hotspotInterface)}/rp_filter",
+                "echo 0 > /proc/sys/net/ipv4/conf/${shellQuote(tunnelInterface)}/rp_filter"
+            )
         )
-        RootShell.execSequential(commands)
     }
 
     private suspend fun restoreRpFilter(
@@ -110,7 +121,53 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
-    suspend fun applyRule(rule: net.ip.rerouter.model.RouteRule): Boolean {
+    /**
+     * Routes locally-generated traffic that is currently associated with a
+     * cellular/WAN interface through the requested tunnel.
+     *
+     * Example:
+     *   rmnet_data3 -> tun1
+     *
+     * becomes:
+     *   local socket -> mangle OUTPUT -> fwmark -> policy table -> tun1
+     *
+     * This is deliberately different from `iif rmnet_data3`, because local
+     * traffic does not enter through rmnet_data3.
+     */
+    private suspend fun applyCellularToTunnelRule(
+        rule: RouteRule,
+        table: Int,
+        mark: Int,
+        chain: String
+    ): List<String> {
+        val commands = mutableListOf<String>()
+
+        commands.add("iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain")
+
+        for (uid in rule.excludedUids) {
+            commands.add(
+                "iptables -t mangle -A $chain -m owner --uid-owner $uid -j RETURN"
+            )
+        }
+
+        /* Attach our chain at the very front of OUTPUT so Android's own
+         * connmark/socket-mark processing cannot send the packet elsewhere
+         * before our route selection is made. */
+        commands.add(
+            "iptables -t mangle -C OUTPUT -j $chain 2>/dev/null || " +
+                "iptables -t mangle -I OUTPUT 1 -j $chain"
+        )
+        commands.add("iptables -t mangle -A $chain -j MARK --set-mark $mark")
+        commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
+        commands.add("ip rule add fwmark $mark table $table priority ${1000 + table}")
+        commands.add(
+            "ip route replace default dev ${shellQuote(rule.toInterface)} table $table"
+        )
+
+        return commands
+    }
+
+    suspend fun applyRule(rule: RouteRule): Boolean {
         val table = rule.tableId
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
@@ -147,7 +204,6 @@ class RoutingEngine {
                 "iptables -C tetherctrl_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT 2>/dev/null || " +
                     "iptables -I tetherctrl_FORWARD 1 -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -j ACCEPT"
             )
-
             commands.add(
                 "iptables -t mangle -C tetherctrl_mangle_FORWARD -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || " +
                     "iptables -t mangle -I tetherctrl_mangle_FORWARD 1 -i ${shellQuote(hotspotInterface)} -o ${shellQuote(tunnelInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
@@ -156,17 +212,17 @@ class RoutingEngine {
                 "iptables -t mangle -C tetherctrl_mangle_FORWARD -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || " +
                     "iptables -t mangle -I tetherctrl_mangle_FORWARD 1 -i ${shellQuote(tunnelInterface)} -o ${shellQuote(hotspotInterface)} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
             )
-
             if (rule.useMasquerade) {
                 commands.add(
                     "iptables -t nat -C tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || " +
                         "iptables -t nat -I tetherctrl_nat_POSTROUTING 1 -o ${shellQuote(tunnelInterface)} -j MASQUERADE"
                 )
             }
-
             commands.add(
                 "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward"
             )
+        } else if (isCellularInterface(rule.fromInterface)) {
+            commands.addAll(applyCellularToTunnelRule(rule, table, mark, chain))
         } else {
             commands.add(
                 "iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain"
@@ -198,7 +254,7 @@ class RoutingEngine {
         return results.isNotEmpty() && results.all { it.isSuccess }
     }
 
-    suspend fun removeRule(rule: net.ip.rerouter.model.RouteRule): Boolean {
+    suspend fun removeRule(rule: RouteRule): Boolean {
         val table = rule.tableId
         val mark = table
         val chain = "${chainPrefix}_${rule.id}"
@@ -229,6 +285,14 @@ class RoutingEngine {
                 "iptables -t nat -D tetherctrl_nat_POSTROUTING -o ${shellQuote(tunnelInterface)} -j MASQUERADE 2>/dev/null || true"
             )
             restoreRpFilter(hotspotInterface, tunnelInterface)
+        } else if (isCellularInterface(rule.fromInterface)) {
+            commands.add(
+                "iptables -t mangle -D OUTPUT -j $chain 2>/dev/null || true"
+            )
+            commands.add("iptables -t mangle -F $chain 2>/dev/null || true")
+            commands.add("iptables -t mangle -X $chain 2>/dev/null || true")
+            commands.add("ip rule del fwmark $mark table $table 2>/dev/null || true")
+            commands.add("ip route flush table $table 2>/dev/null || true")
         } else {
             commands.add(
                 "iptables -t mangle -D PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || true"
@@ -263,7 +327,7 @@ class RoutingEngine {
     }
 
     suspend fun resetAll(
-        rules: List<net.ip.rerouter.model.RouteRule>,
+        rules: List<RouteRule>,
         createdInterfaces: List<String>
     ): Boolean {
         val teardown = rules.map { removeRule(it) }
