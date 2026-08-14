@@ -23,18 +23,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Signing: if a keystore is supplied via env (CI), use it. Otherwise
-            // the release build falls back to being unsigned; CI handles signing.
-            signingConfig = if (project.hasProperty("RELEASE_STORE_FILE")) {
-                signingConfigs.create("release") {
-                    storeFile = file(project.property("RELEASE_STORE_FILE") as String)
-                    storePassword = project.property("RELEASE_STORE_PASSWORD") as String
-                    keyAlias = project.property("RELEASE_KEY_ALIAS") as String
-                    keyPassword = project.property("RELEASE_KEY_PASSWORD") as String
-                }
-            } else {
-                null
-            }
         }
         debug {
             applicationIdSuffix = ".debug"
