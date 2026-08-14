@@ -27,21 +27,47 @@ class RoutingEngine {
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
+    private suspend fun ipRuleLines(): List<String> = RootShell.exec("ip rule").out
+
     private suspend fun findFreePriority(min: Int, max: Int): Int? {
-        val used = RootShell.exec("ip rule").out.mapNotNull { it.substringBefore(":").trim().toIntOrNull() }.toSet()
-        return (max downTo min).firstOrNull { it !in used }
+        val used = ipRuleLines().mapNotNull { it.substringBefore(":").trim().toIntOrNull() }.toSet()
+        return (max downTo min).firstOrNull { it > 0 && it !in used }
     }
 
-    private suspend fun findIifLoTableRules(table: Int): List<Int> = RootShell.exec("ip rule").out.mapNotNull { line ->
+    /**
+     * Find the earliest Android local-traffic policy rule which can consume
+     * packets after netd has assigned an fwmark. Our device-local catch-all
+     * must be before that rule, otherwise Android's rmnet/wlan policy wins.
+     */
+    private suspend fun findLocalPolicyCeiling(): Int? = ipRuleLines()
+        .mapNotNull { line ->
+            val priority = line.substringBefore(":").trim().toIntOrNull() ?: return@mapNotNull null
+            if (priority <= 0) return@mapNotNull null
+            if (line.contains("iif lo") && line.contains("fwmark")) priority else null
+        }
+        .minOrNull()
+
+    /** Pick a free priority immediately before the first Android fwmark/iif-lo rule. */
+    private suspend fun findLocalEgressPriority(): Int? {
+        val ceiling = findLocalPolicyCeiling()
+        if (ceiling == null) {
+            // No fwmark/iif-lo policy was found. Fall back to a free policy slot
+            // below the first broad local rules, still entirely derived at runtime.
+            return findFreePriority(1, 19999)
+        }
+        return findFreePriority(ceiling - 1, 1)
+    }
+
+    private suspend fun findIifLoTableRules(table: Int): List<Int> = ipRuleLines().mapNotNull { line ->
         if (line.contains("from all iif lo ") && line.contains("lookup $table")) line.substringBefore(":").trim().toIntOrNull() else null
     }
 
-    private suspend fun findUidTableRules(uid: Int, table: String): List<Int> = RootShell.exec("ip rule").out.mapNotNull { line ->
+    private suspend fun findUidTableRules(uid: Int, table: String): List<Int> = ipRuleLines().mapNotNull { line ->
         if (line.contains("uidrange $uid-$uid") && line.contains("lookup $table")) line.substringBefore(":").trim().toIntOrNull() else null
     }
 
     private suspend fun findHotspotPolicyPriority(interfaceName: String): Int? {
-        val lines = RootShell.exec("ip rule").out
+        val lines = ipRuleLines()
         val used = lines.mapNotNull { it.substringBefore(":").trim().toIntOrNull() }.toSet()
         val existing = lines.mapNotNull { line ->
             if (line.contains("from all iif $interfaceName ")) line.substringBefore(":").trim().toIntOrNull() else null
@@ -50,7 +76,7 @@ class RoutingEngine {
         return generateSequence(upper) { it - 1 }.firstOrNull { it > 0 && it !in used }
     }
 
-    private suspend fun findExistingHotspotRulePriorities(interfaceName: String, table: Int): List<Int> = RootShell.exec("ip rule").out.mapNotNull { line ->
+    private suspend fun findExistingHotspotRulePriorities(interfaceName: String, table: Int): List<Int> = ipRuleLines().mapNotNull { line ->
         if (line.contains("from all iif $interfaceName ") && line.contains("lookup $table")) line.substringBefore(":").trim().toIntOrNull() else null
     }
 
@@ -87,23 +113,32 @@ class RoutingEngine {
         if (commands.isNotEmpty()) RootShell.execSequential(commands)
     }
 
+    /**
+     * Device-local traffic uses the same mechanism as the known-good manual
+     * setup, but chooses its policy priorities from the device's live ip-rule
+     * topology instead of hardcoding Android-specific numbers.
+     */
     private suspend fun applyLocalEgressRule(rule: RouteRule, table: Int, realRoutingTable: String?): List<String>? {
-        // Match the known-good device-local routing setup first: 20500 is
-        // intentionally preferred because Android's tethering rules commonly
-        // occupy 21000+ while this sits above the usual 17000 rules.
-        val localPriority = findFreePriority(20500, 20500) ?: findFreePriority(20001, 20999) ?: return null
+        val localPriority = findLocalEgressPriority() ?: return null
         val commands = mutableListOf<String>()
+
         if (!realRoutingTable.isNullOrBlank()) {
             var offset = 1
             for (uid in rule.excludedUids) {
                 val priority = localPriority - offset
                 if (priority <= 0) return null
-                findUidTableRules(uid, realRoutingTable).forEach { old -> commands.add("ip rule del priority $old 2>/dev/null || true") }
+                findUidTableRules(uid, realRoutingTable).forEach { old ->
+                    commands.add("ip rule del priority $old 2>/dev/null || true")
+                }
                 commands.add("ip rule add uidrange $uid-$uid lookup ${shellQuote(realRoutingTable)} priority $priority")
                 offset++
             }
         }
-        findIifLoTableRules(table).forEach { old -> commands.add("ip rule del priority $old 2>/dev/null || true") }
+
+        findIifLoTableRules(table).forEach { old ->
+            commands.add("ip rule del priority $old 2>/dev/null || true")
+        }
+
         commands.add("ip route replace default dev ${shellQuote(rule.toInterface)} table $table")
         commands.add("ip rule add iif lo lookup $table priority $localPriority")
         return commands
@@ -132,11 +167,11 @@ class RoutingEngine {
             commands.add("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward")
         } else if (rule.sourceType == SourceInterfaceType.LOCAL_ONLY) {
             val localCommands = applyLocalEgressRule(rule, table, realRoutingTable)
-                ?: return RuleApplyResult(false, stderr = "No free priority in range 20001-20999 for local egress rule, or excluded UID priority underflowed")
+                ?: return RuleApplyResult(false, stderr = "Could not allocate a local policy priority from the device's current ip-rule topology")
             commands.addAll(localCommands)
         } else {
             val priority = findFreePriority(1200, 19999)
-                ?: return RuleApplyResult(false, stderr = "No free ip rule priority in range 1200-19999")
+                ?: return RuleApplyResult(false, stderr = "No free ip rule priority available for interface routing")
             commands.add("iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain")
             commands.add("iptables -t mangle -C PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain 2>/dev/null || iptables -t mangle -A PREROUTING -i ${shellQuote(rule.fromInterface)} -j $chain")
             commands.add("iptables -t mangle -A $chain -m addrtype --dst-type LOCAL -j RETURN")
@@ -194,7 +229,7 @@ class RoutingEngine {
     suspend fun resetAll(rules: List<RouteRule>, createdInterfaces: List<String>, realRoutingTable: String? = null): Boolean {
         val teardown = rules.map { removeRule(it, realRoutingTable) }
         val cleanupCommands = mutableListOf<String>()
-        cleanupCommands.add("for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \${'$'}c 2>/dev/null; iptables -t mangle -X \${'$'}c 2>/dev/null; done")
+        cleanupCommands.add("for c in \\$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do iptables -t mangle -F \\${'$'}c 2>/dev/null; iptables -t mangle -X \\${'$'}c 2>/dev/null; done")
         for (name in createdInterfaces) cleanupCommands.add("ip link delete ${shellQuote(name)} 2>/dev/null || true")
         cleanupCommands.add("echo 0 > /proc/sys/net/ipv4/ip_forward")
         val cleanupResults = RootShell.execSequential(cleanupCommands)
