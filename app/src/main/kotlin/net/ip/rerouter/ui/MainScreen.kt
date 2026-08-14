@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.ui.components.CreateInterfaceDialog
 import net.ip.rerouter.ui.components.CreateRuleDialog
 import net.ip.rerouter.ui.components.InterfaceCard
@@ -195,8 +196,15 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             interfaces = state.interfaces,
             apps = state.installedApps,
             onDismiss = { showCreateRule = false },
-            onConfirm = { from, to, excluded, masquerade ->
-                viewModel.addRule(from, to, excluded, masquerade)
+            onConfirm = { from, to, excluded, masquerade, proxyAppPackage, sourceType ->
+                viewModel.addRule(
+                    fromInterface = from,
+                    toInterface = to,
+                    excludedUids = excluded,
+                    useMasquerade = masquerade,
+                    proxyAppPackage = proxyAppPackage,
+                    sourceType = sourceType
+                )
                 showCreateRule = false
             }
         )
