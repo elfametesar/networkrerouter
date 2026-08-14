@@ -28,7 +28,7 @@ class RoutingEngine {
             commands.add(
                 "HOTSPOT_PRIORITY=0; " +
                     "for p in \$(seq $hotspotPriorityMax -1 $hotspotPriorityMin); do " +
-                    "if ! ip rule | grep -q \"^\\$p:\"; then " +
+                    "if ! ip rule | grep -q \"^\$p:\"; then " +
                     "HOTSPOT_PRIORITY=\$p; break; " +
                     "fi; " +
                     "done; " +
