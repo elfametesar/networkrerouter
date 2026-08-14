@@ -18,22 +18,18 @@ class RoutingEngine {
 
         if (hotspotRule) {
             commands.add(
-                "for p in \$(ip rule | " +
-                    "grep \"from all iif ${shellEscape(rule.fromInterface)} lookup $table\" | " +
+                "for p in \$(ip rule | grep \"from all iif ${shellEscape(rule.fromInterface)} lookup $table\" | " +
                     "sed -n 's/^\\([0-9][0-9]*\\):.*/\\1/p'); do " +
-                    "ip rule del priority \$p 2>/dev/null || true; " +
-                    "done"
+                    "ip rule del priority ${'$'}p 2>/dev/null || true; done"
             )
             commands.add("ip route replace default dev ${shellEscape(rule.toInterface)} table $table")
             commands.add(
                 "HOTSPOT_PRIORITY=0; " +
                     "for p in \$(seq $hotspotPriorityMax -1 $hotspotPriorityMin); do " +
-                    "if ! ip rule | grep -q \"^\$p:\"; then " +
-                    "HOTSPOT_PRIORITY=\$p; break; " +
-                    "fi; " +
-                    "done; " +
-                    "if [ \"\$HOTSPOT_PRIORITY\" = \"0\" ]; then exit 1; fi; " +
-                    "ip rule add iif ${shellEscape(rule.fromInterface)} lookup $table priority \$HOTSPOT_PRIORITY"
+                    "if ! ip rule | grep -q \"^${'$'}{p}:\"; then " +
+                    "HOTSPOT_PRIORITY=${'$'}p; break; fi; done; " +
+                    "if [ \"${'$'}HOTSPOT_PRIORITY\" = \"0\" ]; then exit 1; fi; " +
+                    "ip rule add iif ${shellEscape(rule.fromInterface)} lookup $table priority ${'$'}HOTSPOT_PRIORITY"
             )
         } else {
             commands.add("iptables -t mangle -N $chain 2>/dev/null || iptables -t mangle -F $chain")
@@ -60,16 +56,16 @@ class RoutingEngine {
         if (hotspotRule) {
             commands.add(
                 "iptables -C tetherctrl_FORWARD -i ${shellEscape(rule.fromInterface)} -o ${shellEscape(rule.toInterface)} -j ACCEPT 2>/dev/null || " +
-                    "iptables -I tetherctrl_FORWARD -i ${shellEscape(rule.fromInterface)} -o ${shellEscape(rule.toInterface)} -j ACCEPT"
+                    "iptables -I tetherctrl_FORWARD 1 -i ${shellEscape(rule.fromInterface)} -o ${shellEscape(rule.toInterface)} -j ACCEPT"
             )
             commands.add(
                 "iptables -C tetherctrl_FORWARD -i ${shellEscape(rule.toInterface)} -o ${shellEscape(rule.fromInterface)} -j ACCEPT 2>/dev/null || " +
-                    "iptables -I tetherctrl_FORWARD -i ${shellEscape(rule.toInterface)} -o ${shellEscape(rule.fromInterface)} -j ACCEPT"
+                    "iptables -I tetherctrl_FORWARD 1 -i ${shellEscape(rule.toInterface)} -o ${shellEscape(rule.fromInterface)} -j ACCEPT"
             )
             if (rule.useMasquerade) {
                 commands.add(
                     "iptables -t nat -C tetherctrl_nat_POSTROUTING -o ${shellEscape(rule.toInterface)} -j MASQUERADE 2>/dev/null || " +
-                        "iptables -t nat -I tetherctrl_nat_POSTROUTING -o ${shellEscape(rule.toInterface)} -j MASQUERADE"
+                        "iptables -t nat -I tetherctrl_nat_POSTROUTING 1 -o ${shellEscape(rule.toInterface)} -j MASQUERADE"
                 )
             }
             commands.add("echo 1 > /proc/sys/net/ipv4/ip_forward")
@@ -88,11 +84,9 @@ class RoutingEngine {
 
         if (hotspotRule) {
             commands.add(
-                "for p in \$(ip rule | " +
-                    "grep \"from all iif ${shellEscape(rule.fromInterface)} lookup $table\" | " +
+                "for p in \$(ip rule | grep \"from all iif ${shellEscape(rule.fromInterface)} lookup $table\" | " +
                     "sed -n 's/^\\([0-9][0-9]*\\):.*/\\1/p'); do " +
-                    "ip rule del priority \$p 2>/dev/null || true; " +
-                    "done"
+                    "ip rule del priority ${'$'}p 2>/dev/null || true; done"
             )
             commands.add("ip route flush table $table 2>/dev/null || true")
             commands.add("iptables -D tetherctrl_FORWARD -i ${shellEscape(rule.fromInterface)} -o ${shellEscape(rule.toInterface)} -j ACCEPT 2>/dev/null || true")
@@ -139,11 +133,8 @@ class RoutingEngine {
         val teardown = rules.map { removeRule(it) }
         val cleanupCommands = mutableListOf<String>()
         cleanupCommands.add(
-            "for c in \$(iptables -t mangle -S | " +
-                "grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do " +
-                "iptables -t mangle -F \$c 2>/dev/null; " +
-                "iptables -t mangle -X \$c 2>/dev/null; " +
-                "done"
+            "for c in \$(iptables -t mangle -S | grep -o \"${chainPrefix}_[a-zA-Z0-9]*\" | sort -u); do " +
+                "iptables -t mangle -F ${'$'}c 2>/dev/null; iptables -t mangle -X ${'$'}c 2>/dev/null; done"
         )
         for (name in createdInterfaces) {
             cleanupCommands.add("ip link delete ${shellEscape(name)} 2>/dev/null || true")
