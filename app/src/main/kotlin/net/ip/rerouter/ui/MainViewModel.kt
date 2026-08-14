@@ -56,16 +56,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appState = stateStore.load()
             _uiState.value = _uiState.value.copy(rules = appState.rules)
 
-            // Detect the real routing table for proxy app exemption
             val realTable = interfaceRepo.detectRealRoutingTable()
             _uiState.value = _uiState.value.copy(realRoutingTable = realTable)
 
             refreshInterfaces(showLoading = true)
             loadApps()
 
-            // Android networking can create/remove interfaces after the app is
-            // already open (for example when the hotspot is enabled). Poll the
-            // kernel instead of relying on the list being static.
             launch {
                 while (isActive) {
                     delay(INTERFACE_REFRESH_MS)
@@ -75,21 +71,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Re-reads live kernel interfaces. This deliberately uses ip(8), not the
-     * Android ConnectivityManager list, because root routing can see interfaces
-     * such as wlan1/tun1 that are not represented as normal app networks.
-     */
     fun refreshInterfaces(showLoading: Boolean = false) {
         viewModelScope.launch {
             refreshMutex.withLock {
-                if (showLoading) {
-                    _uiState.value = _uiState.value.copy(isLoading = true)
-                }
-
+                if (showLoading) _uiState.value = _uiState.value.copy(isLoading = true)
                 val created = appState.createdInterfaces.toSet()
                 val list = interfaceRepo.listInterfaces(created)
-
                 _uiState.value = _uiState.value.copy(
                     interfaces = list,
                     isLoading = if (showLoading) false else _uiState.value.isLoading
@@ -100,7 +87,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadApps() {
         viewModelScope.launch {
-            val apps = appRepo.listInstalledApps()
+            /* Load system apps too; the dialog defaults to hiding them and lets
+             * the user opt in. QUERY_ALL_PACKAGES is declared in the manifest. */
+            val apps = appRepo.listInstalledApps(includeSystemApps = true)
             _uiState.value = _uiState.value.copy(installedApps = apps)
         }
     }
@@ -108,22 +97,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun createInterface(name: String, isDummy: Boolean, ipCidr: String? = null) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
-            val ok = if (isDummy) {
-                interfaceRepo.createDummyInterface(name, ipCidr)
-            } else {
-                interfaceRepo.createTunInterface(name, ipCidr)
-            }
-
+            val ok = if (isDummy) interfaceRepo.createDummyInterface(name, ipCidr)
+            else interfaceRepo.createTunInterface(name, ipCidr)
             if (ok) {
                 appState = appState.copy(createdInterfaces = appState.createdInterfaces + name)
                 stateStore.save(appState)
-                refreshInterfaces(showLoading = false)
+                refreshInterfaces(false)
                 _uiState.value = _uiState.value.copy(isLoading = false)
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    errorMessage = "Failed to create interface $name"
-                )
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = "Failed to create interface $name")
             }
         }
     }
@@ -131,12 +113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun removeInterface(name: String) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
-
-            val affected = appState.rules.filter {
-                it.fromInterface == name || it.toInterface == name
-            }
-            affected.forEach { routingEngine.removeRule(it) }
-
+            val affected = appState.rules.filter { it.fromInterface == name || it.toInterface == name }
+            affected.forEach { routingEngine.removeRule(it, _uiState.value.realRoutingTable) }
             val ok = interfaceRepo.removeInterface(name)
             if (ok) {
                 appState = appState.copy(
@@ -145,28 +123,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 stateStore.save(appState)
             } else {
-                _uiState.value = _uiState.value.copy(
-                    errorMessage = "Failed to remove interface $name"
-                )
+                _uiState.value = _uiState.value.copy(errorMessage = "Failed to remove interface $name")
             }
-
-            refreshInterfaces(showLoading = false)
-            _uiState.value = _uiState.value.copy(
-                rules = appState.rules,
-                isLoading = false
-            )
+            refreshInterfaces(false)
+            _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
         }
     }
 
     fun toggleInterfaceState(name: String, up: Boolean) {
         viewModelScope.launch {
             val ok = interfaceRepo.setInterfaceState(name, up)
-            if (!ok) {
-                _uiState.value = _uiState.value.copy(
-                    errorMessage = "Failed to set $name ${if (up) "up" else "down"}"
-                )
-            }
-            refreshInterfaces(showLoading = false)
+            if (!ok) _uiState.value = _uiState.value.copy(errorMessage = "Failed to set $name ${if (up) "up" else "down"}")
+            refreshInterfaces(false)
         }
     }
 
@@ -181,18 +149,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
 
-            // Refresh immediately before applying a rule. This matters when a
-            // hotspot/tunnel appeared seconds ago and the UI just discovered it.
             val liveInterfaces = interfaceRepo.listInterfaces(appState.createdInterfaces.toSet())
             val liveNames = liveInterfaces.map { it.name }.toSet()
-
             if (fromInterface !in liveNames || toInterface !in liveNames) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     errorMessage = "Interface disappeared: $fromInterface → $toInterface"
                 )
-                refreshInterfaces(showLoading = false)
+                refreshInterfaces(false)
                 return@launch
+            }
+
+            var effectiveExcluded = excludedUids
+            if (proxyAppPackage != null) {
+                appRepo.getUidForPackage(proxyAppPackage)?.let { effectiveExcluded = effectiveExcluded + it }
             }
 
             val tableId = appState.nextTableId
@@ -201,34 +171,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fromInterface = fromInterface,
                 toInterface = toInterface,
                 tableId = tableId,
-                excludedUids = excludedUids,
+                excludedUids = effectiveExcluded,
                 useMasquerade = useMasquerade,
                 proxyAppPackage = proxyAppPackage,
                 sourceType = sourceType
             )
 
-            val ok = routingEngine.applyRule(rule)
-            
-            // If proxy app was specified, exempt it
-            var proxyExemptionOk = true
-            if (ok && proxyAppPackage != null) {
-                val proxyUid = appRepo.getUidForPackage(proxyAppPackage)
-                val realTable = _uiState.value.realRoutingTable ?: "rmnet_data0"
-                if (proxyUid != null) {
-                    proxyExemptionOk = routingEngine.exemptProxyApp(proxyUid, realTable)
-                }
-            }
+            val ok = routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
 
-            if (ok && proxyExemptionOk) {
+            if (ok) {
                 appState = appState.copy(
                     rules = appState.rules + rule,
                     nextTableId = if (tableId >= 252) 100 else tableId + 1
                 )
                 stateStore.save(appState)
-                _uiState.value = _uiState.value.copy(
-                    rules = appState.rules,
-                    isLoading = false
-                )
+                _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
             } else {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -242,25 +199,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rule = appState.rules.firstOrNull { it.id == ruleId } ?: return@launch
             _uiState.value = _uiState.value.copy(isLoading = true)
-
-            val ok = routingEngine.removeRule(rule)
-            
-            // If this rule had a proxy app exemption, remove it
-            var proxyCleanupOk = true
-            if (ok && rule.proxyAppPackage != null) {
-                val proxyUid = appRepo.getUidForPackage(rule.proxyAppPackage)
-                if (proxyUid != null) {
-                    proxyCleanupOk = routingEngine.removeProxyAppExemption(proxyUid)
-                }
-            }
-
-            if (ok && proxyCleanupOk) {
+            val ok = routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
+            if (ok) {
                 appState = appState.copy(rules = appState.rules - rule)
                 stateStore.save(appState)
-                _uiState.value = _uiState.value.copy(
-                    rules = appState.rules,
-                    isLoading = false
-                )
+                _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
             } else {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -274,13 +217,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val rule = appState.rules.firstOrNull { it.id == ruleId } ?: return@launch
             _uiState.value = _uiState.value.copy(isLoading = true)
-
             val ok = if (enabled) {
-                routingEngine.applyRule(rule)
+                routingEngine.applyRule(rule, _uiState.value.realRoutingTable)
             } else {
-                routingEngine.removeRule(rule)
+                routingEngine.removeRule(rule, _uiState.value.realRoutingTable)
             }
-
             if (!ok) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -288,41 +229,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-
             val updated = rule.copy(enabled = enabled)
-            appState = appState.copy(
-                rules = appState.rules.map { if (it.id == ruleId) updated else it }
-            )
+            appState = appState.copy(rules = appState.rules.map { if (it.id == ruleId) updated else it })
             stateStore.save(appState)
-            _uiState.value = _uiState.value.copy(
-                rules = appState.rules,
-                isLoading = false
-            )
+            _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
         }
     }
 
     fun resetAll() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
-            routingEngine.resetAll(appState.rules, appState.createdInterfaces)
-            
-            // Clean up proxy app exemptions
-            for (rule in appState.rules) {
-                if (rule.proxyAppPackage != null) {
-                    val proxyUid = appRepo.getUidForPackage(rule.proxyAppPackage)
-                    if (proxyUid != null) {
-                        routingEngine.removeProxyAppExemption(proxyUid)
-                    }
-                }
-            }
-            
+            routingEngine.resetAll(appState.rules, appState.createdInterfaces, _uiState.value.realRoutingTable)
             appState = AppState()
             stateStore.save(appState)
-            refreshInterfaces(showLoading = false)
-            _uiState.value = _uiState.value.copy(
-                rules = emptyList(),
-                isLoading = false
-            )
+            refreshInterfaces(false)
+            _uiState.value = _uiState.value.copy(rules = emptyList(), isLoading = false)
         }
     }
 
