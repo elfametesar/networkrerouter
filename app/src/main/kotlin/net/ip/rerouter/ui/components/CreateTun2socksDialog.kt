@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -70,6 +71,7 @@ fun CreateTun2socksDialog(
     val mtuValid = mtu.toIntOrNull()?.let { it in 576..9000 } == true
     val statsPortValid = !enableStats || statsPort.toIntOrNull()?.let { it in 1..65535 } == true
 
+    @Composable
     fun fieldColors() = TextFieldDefaults.colors(
         focusedTextColor = TextPrimary,
         unfocusedTextColor = TextPrimary,
