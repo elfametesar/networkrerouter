@@ -14,6 +14,13 @@ Root Android utility for creating virtual interfaces and applying interface-to-i
 - Release builds are wired to an explicit signing configuration instead of silently producing an unsigned release APK.
 - GitHub Actions can sign release builds using repository secrets.
 
+## tun2socks sessions
+
+- The app bundles the [xjasonlyu/tun2socks](https://github.com/xjasonlyu/tun2socks) binary (gVisor-based, MIT licensed) as `libtun2socks.so` under `jniLibs/{arm64-v8a,armeabi-v7a}` so AGP extracts it to a real, execute-permitted file on disk at install time.
+- A tun2socks session reads raw IP packets off an app-created TUN interface and forwards each TCP/UDP flow through a SOCKS5/HTTP/Shadowsocks proxy, run as a root-owned detached process (`setsid nohup ... &`) so it keeps running independently of this app's process.
+- The real egress interface tun2socks dials the proxy through is detected live (same `detectRealRoutingTable()` used elsewhere), never hardcoded.
+- Session state (proxy address, protocol, MTU, etc.) persists across app restarts; PID files under the app's private files dir track whether a session is actually still running.
+
 ## Release signing
 
 For local builds, copy `signing.properties.example` to `signing.properties` and point it at your release keystore.

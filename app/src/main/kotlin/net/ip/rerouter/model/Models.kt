@@ -15,7 +15,11 @@ data class NetInterface(
     val txBytes: Long = 0L,
     /** True if this interface was created by the app (tun/dummy we own), vs a system one. */
     val isAppCreated: Boolean = false,
-    val kind: InterfaceKind = InterfaceKind.OTHER
+    val kind: InterfaceKind = InterfaceKind.OTHER,
+    /** Default gateway for this interface, read live from `ip route`, if any. */
+    val gateway: String? = null,
+    /** DNS servers currently associated with this interface (from `getprop net.dns*` / resolvers), if discoverable. */
+    val dnsServers: List<String> = emptyList()
 )
 
 enum class InterfaceKind {
@@ -61,17 +65,6 @@ data class RouteRule(
     val sourceType: SourceInterfaceType = SourceInterfaceType.LOCAL_ONLY
 )
 
-/** Configuration for proxy app exemption: prevents proxy's own traffic from being routed into itself. */
-@Serializable
-data class ProxyAppConfig(
-    /** Package name to exempt (e.g., "com.v2raytun.android"). */
-    val packageName: String,
-    /** Runtime UID looked up from PackageManager. */
-    val uid: Int? = null,
-    /** Routing table for proxy's real traffic to use (e.g., "rmnet_data0"). */
-    val realTable: String = "rmnet_data0"
-)
-
 /** An installed app, for the exclusion picker. */
 @Serializable
 data class AppInfo(
@@ -86,5 +79,30 @@ data class AppInfo(
 data class AppState(
     val createdInterfaces: List<String> = emptyList(),
     val rules: List<RouteRule> = emptyList(),
-    val nextTableId: Int = 100
+    val nextTableId: Int = 100,
+    val tun2socksSessions: List<Tun2socksConfig> = emptyList()
+)
+
+/** Proxy protocols tun2socks can dial out through. */
+enum class ProxyProtocol { SOCKS5, HTTP, SHADOWSOCKS, DIRECT }
+
+/**
+ * Configuration for a tun2socks session: reads IP packets off a TUN device
+ * this app owns and forwards each TCP/UDP flow through a proxy.
+ */
+@Serializable
+data class Tun2socksConfig(
+    val id: String,
+    /** The TUN interface this session reads/writes packets on. Must already exist (see InterfaceRepository.createTunInterface). */
+    val tunInterface: String,
+    val proxyProtocol: ProxyProtocol = ProxyProtocol.SOCKS5,
+    /** host:port of the upstream proxy, e.g. "127.0.0.1:1080". */
+    val proxyAddress: String = "",
+    val proxyUsername: String? = null,
+    val proxyPassword: String? = null,
+    /** MTU to advertise on the gVisor stack; should match the TUN interface's MTU. */
+    val mtu: Int = 1500,
+    /** Optional loopback API port for /netstats and /debug/pprof; null disables it. */
+    val apiPort: Int? = null,
+    val enabled: Boolean = true
 )

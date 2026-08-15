@@ -16,12 +16,17 @@ class RoutingEngine {
     private data class RpFilterState(val all: String?, val hotspot: String?, val tunnel: String?)
     private val rpFilterStates = mutableMapOf<String, RpFilterState>()
 
-    private fun isHotspotInterface(name: String): Boolean = when {
-        name == "wlan0" -> false
-        name.startsWith("wlan") -> true
-        name.startsWith("swlan") -> true
-        name == "ap0" -> true
-        else -> false
+    private fun isHotspotInterface(name: String): Boolean = isHotspotInterfaceName(name)
+
+    companion object {
+        /** Single source of truth for "is this a hotspot/tethering client-facing interface". */
+        fun isHotspotInterfaceName(name: String): Boolean = when {
+            name == "wlan0" -> false
+            name.startsWith("wlan") -> true
+            name.startsWith("swlan") -> true
+            name == "ap0" -> true
+            else -> false
+        }
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
@@ -223,12 +228,6 @@ class RoutingEngine {
         val results = RootShell.execSequential(commands)
         return results.all { it.isSuccess }
     }
-
-    suspend fun exemptProxyApp(proxyUid: Int, realTable: String, priority: Int): Boolean =
-        RootShell.exec("ip rule add uidrange $proxyUid-$proxyUid lookup ${shellQuote(realTable)} priority $priority").isSuccess
-
-    suspend fun removeProxyAppExemption(proxyUid: Int): Boolean =
-        RootShell.exec("ip rule del uidrange $proxyUid-$proxyUid 2>/dev/null || true").isSuccess
 
     suspend fun resetAll(rules: List<RouteRule>, createdInterfaces: List<String>, realRoutingTable: String? = null): Boolean {
         val teardown = rules.map { removeRule(it, realRoutingTable) }

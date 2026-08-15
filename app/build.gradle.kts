@@ -82,6 +82,16 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // Force extraction to nativeLibraryDir as real files on disk (not
+            // mmap'd straight out of the APK). We're not shipping a real
+            // shared library here — libtun2socks.so is a statically linked
+            // Go executable we exec() as a subprocess via root — and some
+            // Android/SELinux configurations don't allow executing straight
+            // out of an APK's zip. Extracting to nativeLibraryDir guarantees
+            // an on-disk, execute-permitted file regardless of OEM/SDK level.
+            useLegacyPackaging = true
+        }
     }
 }
 

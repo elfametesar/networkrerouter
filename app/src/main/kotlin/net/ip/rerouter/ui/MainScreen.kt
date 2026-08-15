@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.RestartAlt
+import androidx.compose.material.icons.outlined.Troubleshoot
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -39,12 +40,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import net.ip.rerouter.model.InterfaceKind
 import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.ui.components.CreateInterfaceDialog
 import net.ip.rerouter.ui.components.CreateRuleDialog
+import net.ip.rerouter.ui.components.CreateTun2socksDialog
+import net.ip.rerouter.ui.components.DiagnosticsDialog
 import net.ip.rerouter.ui.components.InterfaceCard
 import net.ip.rerouter.ui.components.ResetConfirmDialog
 import net.ip.rerouter.ui.components.RuleCard
+import net.ip.rerouter.ui.components.Tun2socksCard
 import net.ip.rerouter.ui.theme.AccentDanger
 import net.ip.rerouter.ui.theme.AppType
 import net.ip.rerouter.ui.theme.BgBase
@@ -57,6 +62,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     var showCreateInterface by remember { mutableStateOf(false) }
     var showCreateRule by remember { mutableStateOf(false) }
     var showResetConfirm by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
+    var showCreateTun2socks by remember { mutableStateOf(false) }
 
     val snackbarHost = remember { SnackbarHostState() }
 
@@ -88,6 +95,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         icon = { Icon(Icons.Outlined.Add, contentDescription = null) },
                         text = { Text("Route") }
                     )
+
+                    Spacer(Modifier.height(10.dp))
+
+                    ExtendedFloatingActionButton(
+                        onClick = { showCreateTun2socks = true },
+                        icon = { Icon(Icons.Outlined.Add, contentDescription = null) },
+                        text = { Text("tun2socks") }
+                    )
                 }
             }
         ) { padding ->
@@ -110,6 +125,24 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             Text(
                                 "${state.interfaces.size} live interfaces · ${state.rules.count { it.enabled }} active routes",
                                 style = AppType.bodySecondary
+                            )
+                            if (state.realRoutingTable != null) {
+                                Text(
+                                    "cellular real table: ${state.realRoutingTable}",
+                                    style = AppType.dataSecondary
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = {
+                                viewModel.refreshDiagnostics()
+                                showDiagnostics = true
+                            }
+                        ) {
+                            Icon(
+                                Icons.Outlined.Troubleshoot,
+                                contentDescription = "Routing diagnostics"
                             )
                         }
 
@@ -143,7 +176,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                             { viewModel.removeInterface(iface.name) }
                         } else {
                             null
-                        }
+                        },
+                        onEditMtu = { mtu -> viewModel.setInterfaceMtu(iface.name, mtu) }
                     )
                 }
 
@@ -158,10 +192,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                     val excludedLabels = state.installedApps
                         .filter { it.uid in rule.excludedUids }
                         .map { it.label }
+                    val proxyLabel = rule.proxyAppPackage?.let { pkg ->
+                        state.installedApps.firstOrNull { it.packageName == pkg }?.label ?: pkg
+                    }
 
                     RuleCard(
                         rule = rule,
                         excludedAppLabels = excludedLabels,
+                        proxyAppLabel = proxyLabel,
                         onToggleEnabled = { enabled ->
                             viewModel.toggleRuleEnabled(rule.id, enabled)
                         },
@@ -172,6 +210,36 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                 if (state.rules.isEmpty()) {
                     item {
                         EmptyRow("No routes yet — traffic follows the system routing tables")
+                    }
+                }
+
+                item { Spacer(Modifier.height(6.dp)) }
+                item { SectionHeader("tun2socks sessions") }
+
+                items(state.tun2socksSessions, key = { it.id }) { session ->
+                    Tun2socksCard(
+                        config = session,
+                        isRunning = state.tun2socksRunning[session.id] == true,
+                        onStart = {
+                            viewModel.startTun2socks(
+                                tunInterface = session.tunInterface,
+                                proxyProtocol = session.proxyProtocol,
+                                proxyAddress = session.proxyAddress,
+                                proxyUsername = session.proxyUsername,
+                                proxyPassword = session.proxyPassword,
+                                mtu = session.mtu,
+                                apiPort = session.apiPort
+                            )
+                        },
+                        onStop = { viewModel.stopTun2socks(session.id) },
+                        onRemove = { viewModel.removeTun2socksSession(session.id) },
+                        onViewLog = { viewModel.tun2socksLog(session.id) }
+                    )
+                }
+
+                if (state.tun2socksSessions.isEmpty()) {
+                    item {
+                        EmptyRow("No tun2socks sessions — reads a TUN device's packets and forwards them through a proxy")
                     }
                 }
 
@@ -216,6 +284,27 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
             onConfirm = {
                 viewModel.resetAll()
                 showResetConfirm = false
+            }
+        )
+    }
+
+    if (showDiagnostics) {
+        DiagnosticsDialog(
+            policyRules = state.policyRules,
+            routeTableDump = state.routeTableDump,
+            realRoutingTable = state.realRoutingTable,
+            onRefresh = { viewModel.refreshDiagnostics() },
+            onDismiss = { showDiagnostics = false }
+        )
+    }
+
+    if (showCreateTun2socks) {
+        CreateTun2socksDialog(
+            tunInterfaces = state.interfaces.filter { it.kind == InterfaceKind.VPN_TUN },
+            onDismiss = { showCreateTun2socks = false },
+            onConfirm = { tunInterface, protocol, address, username, password, mtu, apiPort ->
+                viewModel.startTun2socks(tunInterface, protocol, address, username, password, mtu, apiPort)
+                showCreateTun2socks = false
             }
         )
     }

@@ -14,12 +14,15 @@ import kotlinx.coroutines.sync.withLock
 import net.ip.rerouter.model.AppInfo
 import net.ip.rerouter.model.AppState
 import net.ip.rerouter.model.NetInterface
+import net.ip.rerouter.model.ProxyProtocol
 import net.ip.rerouter.model.RouteRule
 import net.ip.rerouter.model.SourceInterfaceType
+import net.ip.rerouter.model.Tun2socksConfig
 import net.ip.rerouter.net.AppRepository
 import net.ip.rerouter.net.InterfaceRepository
 import net.ip.rerouter.net.RoutingEngine
 import net.ip.rerouter.net.StateStore
+import net.ip.rerouter.net.Tun2socksEngine
 import net.ip.rerouter.root.RootShell
 import java.util.UUID
 
@@ -30,7 +33,12 @@ data class UiState(
     val installedApps: List<AppInfo> = emptyList(),
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
-    val realRoutingTable: String? = null
+    val realRoutingTable: String? = null,
+    val policyRules: List<String> = emptyList(),
+    val routeTableDump: List<String> = emptyList(),
+    val tun2socksSessions: List<Tun2socksConfig> = emptyList(),
+    /** Live running-state per session id, refreshed alongside interfaces. */
+    val tun2socksRunning: Map<String, Boolean> = emptyMap()
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -38,6 +46,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val interfaceRepo = InterfaceRepository()
     private val appRepo = AppRepository(application)
     private val routingEngine = RoutingEngine()
+    private val tun2socksEngine = Tun2socksEngine(application)
     private val stateStore = StateStore(application)
     private val refreshMutex = Mutex()
 
@@ -53,9 +62,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!rootOk) return@launch
 
             appState = stateStore.load()
-            _uiState.value = _uiState.value.copy(rules = appState.rules)
+            _uiState.value = _uiState.value.copy(rules = appState.rules, tun2socksSessions = appState.tun2socksSessions)
             refreshRealRoutingTable()
             refreshInterfaces(showLoading = true)
+            refreshTun2socksStatus()
             loadApps()
 
             launch {
@@ -63,6 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     delay(INTERFACE_REFRESH_MS)
                     refreshInterfaces(showLoading = false)
                     refreshRealRoutingTable()
+                    refreshTun2socksStatus()
                 }
             }
         }
@@ -139,11 +150,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(isLoading = true)
             val affected = appState.rules.filter { it.fromInterface == name || it.toInterface == name }
             affected.forEach { routingEngine.removeRule(it, _uiState.value.realRoutingTable) }
+            val affectedSessions = appState.tun2socksSessions.filter { it.tunInterface == name }
+            affectedSessions.forEach { tun2socksEngine.stop(it.id) }
             val ok = interfaceRepo.removeInterface(name)
             if (ok) {
                 appState = appState.copy(
                     createdInterfaces = appState.createdInterfaces - name,
-                    rules = appState.rules - affected.toSet()
+                    rules = appState.rules - affected.toSet(),
+                    tun2socksSessions = appState.tun2socksSessions - affectedSessions.toSet()
                 )
                 stateStore.save(appState)
             } else {
@@ -151,7 +165,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             refreshInterfaces(false)
             refreshRealRoutingTable()
-            _uiState.value = _uiState.value.copy(rules = appState.rules, isLoading = false)
+            refreshTun2socksStatus()
+            _uiState.value = _uiState.value.copy(rules = appState.rules, tun2socksSessions = appState.tun2socksSessions, isLoading = false)
         }
     }
 
@@ -161,6 +176,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!ok) _uiState.value = _uiState.value.copy(errorMessage = "Failed to set $name ${if (up) "up" else "down"}")
             refreshInterfaces(false)
             refreshRealRoutingTable()
+        }
+    }
+
+    fun setInterfaceMtu(name: String, mtu: Int) {
+        viewModelScope.launch {
+            val ok = interfaceRepo.setInterfaceMtu(name, mtu)
+            if (!ok) _uiState.value = _uiState.value.copy(errorMessage = "Failed to set MTU $mtu on $name")
+            refreshInterfaces(false)
         }
     }
 
@@ -268,18 +291,103 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetAll() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
+            appState.tun2socksSessions.forEach { tun2socksEngine.stop(it.id) }
             routingEngine.resetAll(appState.rules, appState.createdInterfaces, _uiState.value.realRoutingTable)
             appState = AppState()
             stateStore.save(appState)
             refreshInterfaces(false)
             refreshRealRoutingTable()
-            _uiState.value = _uiState.value.copy(rules = emptyList(), isLoading = false)
+            _uiState.value = _uiState.value.copy(rules = emptyList(), tun2socksSessions = emptyList(), tun2socksRunning = emptyMap(), isLoading = false)
         }
     }
 
     fun clearError() {
         _uiState.value = _uiState.value.copy(errorMessage = null)
     }
+
+    /** Loads live `ip rule` and `ip route show table all` for the diagnostics view, so failures are inspectable instead of guessed at. */
+    fun refreshDiagnostics() {
+        viewModelScope.launch {
+            val rules = interfaceRepo.listPolicyRules()
+            val routes = interfaceRepo.listRoutes()
+            _uiState.value = _uiState.value.copy(policyRules = rules, routeTableDump = routes)
+        }
+    }
+
+    private suspend fun refreshTun2socksStatus() {
+        val running = appState.tun2socksSessions.associate { it.id to tun2socksEngine.isRunning(it.id) }
+        _uiState.value = _uiState.value.copy(tun2socksRunning = running)
+    }
+
+    /**
+     * Creates (or updates, if a session for this tunInterface already exists)
+     * a tun2socks session and starts it immediately. `tunInterface` must
+     * already exist (create it first via createInterface). The real egress
+     * interface tun2socks dials the proxy through is detected live, same as
+     * every other real-routing-table lookup in this app — never hardcoded.
+     */
+    fun startTun2socks(
+        tunInterface: String,
+        proxyProtocol: ProxyProtocol,
+        proxyAddress: String,
+        proxyUsername: String?,
+        proxyPassword: String?,
+        mtu: Int,
+        apiPort: Int?
+    ) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+
+            val existing = appState.tun2socksSessions.firstOrNull { it.tunInterface == tunInterface }
+            val config = Tun2socksConfig(
+                id = existing?.id ?: UUID.randomUUID().toString().take(8),
+                tunInterface = tunInterface,
+                proxyProtocol = proxyProtocol,
+                proxyAddress = proxyAddress,
+                proxyUsername = proxyUsername?.takeIf { it.isNotBlank() },
+                proxyPassword = proxyPassword?.takeIf { it.isNotBlank() },
+                mtu = mtu,
+                apiPort = apiPort,
+                enabled = true
+            )
+
+            val liveRealTable = interfaceRepo.detectRealRoutingTable()
+            val result = tun2socksEngine.start(config, realInterface = liveRealTable)
+            if (!result.isSuccess) {
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = result.error ?: "Failed to start tun2socks")
+                return@launch
+            }
+
+            appState = appState.copy(
+                tun2socksSessions = appState.tun2socksSessions.filterNot { it.id == config.id } + config
+            )
+            stateStore.save(appState)
+            refreshTun2socksStatus()
+            _uiState.value = _uiState.value.copy(tun2socksSessions = appState.tun2socksSessions, isLoading = false)
+        }
+    }
+
+    fun stopTun2socks(sessionId: String) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            tun2socksEngine.stop(sessionId)
+            refreshTun2socksStatus()
+            _uiState.value = _uiState.value.copy(isLoading = false)
+        }
+    }
+
+    fun removeTun2socksSession(sessionId: String) {
+        viewModelScope.launch {
+            tun2socksEngine.stop(sessionId)
+            appState = appState.copy(tun2socksSessions = appState.tun2socksSessions.filterNot { it.id == sessionId })
+            stateStore.save(appState)
+            refreshTun2socksStatus()
+            _uiState.value = _uiState.value.copy(tun2socksSessions = appState.tun2socksSessions)
+        }
+    }
+
+    /** Fetches the tail of a session's stdout/stderr log for troubleshooting. */
+    suspend fun tun2socksLog(sessionId: String): List<String> = tun2socksEngine.recentLog(sessionId)
 
     private companion object {
         const val INTERFACE_REFRESH_MS = 2000L

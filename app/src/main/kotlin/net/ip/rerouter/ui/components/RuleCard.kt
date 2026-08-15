@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
 import net.ip.rerouter.model.RouteRule
+import net.ip.rerouter.model.SourceInterfaceType
 import net.ip.rerouter.ui.theme.AccentDanger
 import net.ip.rerouter.ui.theme.AccentSignal
 import net.ip.rerouter.ui.theme.AppType
@@ -63,6 +64,7 @@ private fun FlowConnector(active: Boolean, modifier: Modifier = Modifier) {
 fun RuleCard(
     rule: RouteRule,
     excludedAppLabels: List<String>,
+    proxyAppLabel: String?,
     onToggleEnabled: (Boolean) -> Unit,
     onRemove: () -> Unit
 ) {
@@ -92,15 +94,14 @@ fun RuleCard(
             Spacer(Modifier.height(8.dp))
             Row {
                 Text(
-                    if (rule.useMasquerade) "NAT · table ${rule.tableId}" else "table ${rule.tableId}",
+                    buildString {
+                        append(if (rule.useMasquerade) "NAT · table ${rule.tableId}" else "table ${rule.tableId}")
+                        append(if (rule.sourceType == SourceInterfaceType.LOCAL_AND_HOTSPOT) " · +hotspot" else " · local only")
+                        if (excludedAppLabels.isNotEmpty()) append("  ·  ${excludedAppLabels.size} excluded")
+                        if (proxyAppLabel != null) append("  ·  proxy: $proxyAppLabel")
+                    },
                     style = AppType.dataSecondary
                 )
-                if (excludedAppLabels.isNotEmpty()) {
-                    Text(
-                        "  ·  ${excludedAppLabels.size} excluded",
-                        style = AppType.dataSecondary
-                    )
-                }
             }
         }
     }
